@@ -131,7 +131,7 @@ def get_args():
     parser.add_argument('--N', type=int, default=5, help='number of ways')
     parser.add_argument('--K', type=int, default=5, help='number of shots')
     parser.add_argument('--Q', type=int, default=5, help='number of queries')   
-    parser.add_argument('--num_train_tasks', type=int, default=50, help='number of meta-training tasks (5)')
+    parser.add_argument('--num_train_tasks', type=int, default=1, help='number of meta-training tasks (5)')
     parser.add_argument('--num_test_tasks', type=int, default=10, help='number of meta-test tasks')
     parser.add_argument('--num_true_test_ratio', type=int, default=10, help='number of meta-test tasks (10)')
     parser.add_argument('--fine_tune_steps', type=int, default=5, help='number of meta-learning steps (5)')
@@ -166,7 +166,7 @@ def get_args():
     parser.add_argument('--datadir', type=str, required=False, default="./data/", help="Data directory")
     parser.add_argument('--reg', type=float, default=1e-5, help="L2 regularization strength")
     parser.add_argument('--logdir', type=str, required=False, default="./logs/", help='Log directory path')
-    parser.add_argument('--modeldir', type=str, required=False, default="./models/", help='Model directory path')
+    parser.add_argument('--checkpoint_dir', type=str, required=False, default="./checkpoints/", help='Model checkpoint directory path')
     parser.add_argument('--beta', type=float, default=1,  #0.5
                         help='The parameter for the dirichlet distribution for data partitioning')
     parser.add_argument('--device', type=str, default='cuda:0', help='The device to run the program')
@@ -189,6 +189,9 @@ def get_args():
     parser.add_argument('--use_project_head', type=int, default=1)
     parser.add_argument('--server_momentum', type=float, default=0, help='the server momentum (FedAvgM)')
     args = parser.parse_args()
+
+    # temporary configuration
+    args.dataset = 'FC100'
     return args
 
 
@@ -199,7 +202,7 @@ def init_nets(net_configs, n_parties, args, device='cpu'):
     elif args.dataset == 'celeba':
         n_classes = 2
     elif args.dataset == 'cifar100' or args.dataset=='FC100' :
-        total_classes=60 #100
+        total_classes=100 #100
     elif args.dataset=='miniImageNet':
         total_classes=64
     elif args.dataset == '20newsgroup':
@@ -645,7 +648,7 @@ def local_train_net_few_shot(nets, args, net_dataidx_map, X_train, y_train, X_te
         #y_test=test_ds.target
 
 
-        if test_only==False:
+        if test_only is False:
             testacc = train_net_few_shot_new(net_id, net, n_epoch, args.lr, args.optimizer, args, X_train_client,y_train_client,X_test, y_test,
                                         device=device, test_only=False)
         else:
@@ -708,7 +711,7 @@ if __name__ == '__main__':
         fine_split_train_map = {class_: i for i, class_ in enumerate(list(range(20)))}
     
     mkdirs(args.logdir)
-    mkdirs(args.modeldir)
+    mkdirs(args.checkpoint_dir)
     if args.log_file_name is None:
         argument_path = 'experiment_arguments-%s.json' % datetime.datetime.now().strftime("%Y-%m-%d-%H%M-%S")
     else:
@@ -796,6 +799,19 @@ if __name__ == '__main__':
         global_model.load_state_dict(torch.load(args.load_model_file))
         n_comm_rounds -= args.load_model_round
 
+    # TODO: set up the generator========================================================
+    out_channel = 100
+    in_channel = 3
+    g_model_arch = 'CGeneratorA'
+    nz = 100
+    nc = 3
+    img_size = 32
+    from models import model_factory_fn
+    g_model_func = lambda: model_factory_fn.get_generator(g_model_arch, nz=nz, nc=nc,
+                                                          img_size=img_size, n_cls=out_channel)
+    init_g_model = g_model_func()
+    # TODO: ==============================================================================
+
     if args.server_momentum:
         moment_v = copy.deepcopy(global_model.state_dict())
         for key in moment_v:
@@ -860,6 +876,27 @@ if __name__ == '__main__':
                     for key in net_para:
                         global_w[key] += net_para[key] * fed_avg_freqs[net_id]
 
+            # TODO: Use knowledge distillation for the global model===========================
+            from FedFTG import *
+
+            client_class_num = np.ones((n_party_per_round, 100))
+            glb_model_lr = 0.1
+            gen_model_lr = 0.01
+            lr_decay_per_round = 0.998
+            global_model.load_state_dict(global_w)
+            batch_size = 50
+            print_per = 200
+            weight_decay = 1e-3
+
+            avg_model_ft = local_to_global_knowledge_distillation(global_model, init_g_model, nets_this_round.values(),
+                                                                  client_class_num,
+                                                                  glb_model_lr * (lr_decay_per_round ** round),
+                                                                  gen_model_lr * (lr_decay_per_round ** round),
+                                                                  batch_size, print_per, weight_decay,
+                                                                  'CIFAR10',
+                                                                  None, None, None, None)
+            # TODO: ===========================================================================
+
             if args.server_momentum:
                 delta_w = copy.deepcopy(global_w)
                 for key in delta_w:
@@ -875,8 +912,8 @@ if __name__ == '__main__':
             print('>> Current Round: {}'.format(round))
             logger.info('>> Current Round: {}'.format(round))
             
-            mkdirs(args.modeldir+'fedavg/')
+            mkdirs(args.checkpoint_dir+'fedavg/')
 
             if global_acc > best_acc:
-                torch.save(global_model.state_dict(), args.modeldir+'fedavg/'+'globalmodel'+args.log_file_name+'.pth')
-                torch.save(nets[0].state_dict(), args.modeldir+'fedavg/'+'localmodel0'+args.log_file_name+'.pth')
+                torch.save(global_model.state_dict(), args.checkpoint_dir+'fedavg/'+'globalmodel'+args.log_file_name+'.pth')
+                torch.save(nets[0].state_dict(), args.checkpoint_dir+'fedavg/'+'localmodel0'+args.log_file_name+'.pth')

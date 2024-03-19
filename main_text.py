@@ -166,7 +166,7 @@ def get_args():
     parser.add_argument('--datadir', type=str, required=False, default="./data/", help="Data directory")
     parser.add_argument('--reg', type=float, default=1e-5, help="L2 regularization strength")
     parser.add_argument('--logdir', type=str, required=False, default="./logs/", help='Log directory path')
-    parser.add_argument('--modeldir', type=str, required=False, default="./models/", help='Model directory path')
+    parser.add_argument('--checkpoint_dir', type=str, required=False, default="./checkpoints/", help='Model checkpoint directory path')
     parser.add_argument('--beta', type=float, default=1,  # 0.5
                         help='The parameter for the dirichlet distribution for data partitioning')
     parser.add_argument('--device', type=str, default='cuda:0', help='The device to run the program')
@@ -193,6 +193,9 @@ def get_args():
     parser.add_argument('--server_momentum', type=float, default=0, help='the server momentum (FedAvgM)')
     args = parser.parse_args()
     args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+    print(os.environ['CUDA_VISIBLE_DEVICES'])
+    args.dataset = '20newsgroup'
     return args
 
 
@@ -663,7 +666,7 @@ if __name__ == '__main__':
         fine_split_train_map = {class_: i for i, class_ in enumerate(list(range(20)))}
 
     mkdirs(args.logdir)
-    mkdirs(args.modeldir)
+    mkdirs(args.checkpoint_dir)
     if args.log_file_name is None:
         argument_path = 'experiment_arguments-%s.json' % datetime.datetime.now().strftime("%Y-%m-%d-%H%M-%S")
     else:
@@ -809,6 +812,7 @@ if __name__ == '__main__':
             local_train_net_few_shot(nets_this_round, args, net_dataidx_map, X_train, y_train, X_test, y_test,
                                      device=device)
 
+            # Global aggregation
             for net_id, net in enumerate(nets_this_round.values()):
                 net_para = net.state_dict()
                 if net_id == 0:
@@ -830,10 +834,10 @@ if __name__ == '__main__':
             print('>> Current Round: {}'.format(round))
             logger.info('>> Current Round: {}'.format(round))
 
-            mkdirs(args.modeldir + 'fedavg/')
+            mkdirs(args.checkpoint_dir + 'fedavg/')
 
             if global_acc > best_acc:
                 torch.save(global_model.state_dict(),
-                           args.modeldir + 'fedavg/' + 'globalmodel' + args.log_file_name + '.pth')
+                           args.checkpoint_dir + 'fedavg/' + 'globalmodel' + args.log_file_name + '.pth')
                 torch.save(nets[0].state_dict(),
-                           args.modeldir + 'fedavg/' + 'localmodel0' + args.log_file_name + '.pth')
+                           args.checkpoint_dir + 'fedavg/' + 'localmodel0' + args.log_file_name + '.pth')

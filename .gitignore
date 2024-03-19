@@ -8,7 +8,6 @@ data/text-data/
 *.pkl
 view
 logs/
-models/
 venv/
 wiki.en.vec
 
