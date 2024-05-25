@@ -10,8 +10,9 @@ import torch.nn as nn
 import random
 from sklearn.metrics import confusion_matrix
 import pickle as pkl
-#from model import *
+# from model import *
 from datasets import CIFAR10_truncated, CIFAR100_truncated, ImageFolder_custom
+from collections import defaultdict
 
 logging.basicConfig()
 logger = logging.getLogger()
@@ -118,6 +119,7 @@ def partition_data(dataset, datadir, logdir, partition, n_parties, beta=0.4):
     if dataset == 'cifar10':
         X_train, y_train, X_test, y_test = load_cifar10_data(datadir)
     elif dataset == 'cifar100' or dataset == 'FC100':
+        # There are 100 classes and 20 Superclasses in CIFAR100
         fine_id_coarse_id = {0: 4, 1: 1, 2: 14, 3: 8, 4: 0, 5: 6, 6: 7, 7: 7, 8: 18, 9: 3, 10: 3, 11: 14, 12: 9, 13: 18,
                              14: 7, 15: 11, 16: 3, 17: 9, 18: 7, 19: 11, 20: 6, 21: 11, 22: 5, 23: 10, 24: 7, 25: 6,
                              26: 13, 27: 15, 28: 3, 29: 15, 30: 0, 31: 11, 32: 1, 33: 10, 34: 12, 35: 14, 36: 16, 37: 9,
@@ -128,9 +130,10 @@ def partition_data(dataset, datadir, logdir, partition, n_parties, beta=0.4):
                              86: 5, 87: 5, 88: 8, 89: 19, 90: 18, 91: 1, 92: 2, 93: 15, 94: 6, 95: 0, 96: 17, 97: 8,
                              98: 14, 99: 13}
 
-        coarse_split = {'train': [1, 2, 3, 4, 5, 6, 9, 10, 15, 17, 18, 19], 'valid': [8, 11, 13, 16],
-                        'test': [0, 7, 12, 14]}
-        from collections import defaultdict
+        # 6 : 2 : 2 split
+        coarse_split = {'train': [1, 2, 3, 4, 5, 6, 9, 10, 15, 17, 18, 19],
+                        'valid': [8, 11, 13, 16], 'test': [0, 7, 12, 14]}
+
         fine_split = defaultdict(list)
         for fine_id, sparse_id in fine_id_coarse_id.items():
             if sparse_id in coarse_split['train']:
@@ -140,15 +143,7 @@ def partition_data(dataset, datadir, logdir, partition, n_parties, beta=0.4):
             else:
                 fine_split['test'].append(fine_id)
         X_train, y_train, X_test, y_test = load_cifar100_data(datadir)
-    elif dataset == 'miniImageNet':
-        X_train, y_train, X_test, y_test = load_miniImageNet(datadir)
-    elif dataset == '20newsgroup' or dataset == 'fewrel' or dataset=='huffpost':
-        X_train, y_train, X_test, y_test = load_text_data(datadir, dataset)
 
-    elif dataset == 'tinyimagenet':
-        X_train, y_train, X_test, y_test = load_tinyimagenet_data(datadir)
-
-    if dataset == 'FC100':
         X_total = np.concatenate([X_train, X_test], 0)
         y_total = np.concatenate([y_train, y_test], 0)
         #    X_train=np.concatenate([X_total[Y_total==k] for k in fine_split['train']],0)
@@ -156,12 +151,12 @@ def partition_data(dataset, datadir, logdir, partition, n_parties, beta=0.4):
         #    X_test=np.concatenate([X_total[Y_total==k] for k in fine_split['test']],0)
         #    y_test=np.concatenate([Y_total[Y_total==k] for k in fine_split['test']],0)
 
-        test_dataidxs = []
+        test_data_idxs = []
         for k in fine_split['test']:
-            test_dataidxs.extend(np.where(y_total == k)[0].tolist())
+            test_data_idxs.extend(np.where(y_total == k)[0].tolist())
 
-        X_test = X_total[test_dataidxs]
-        y_test = y_total[test_dataidxs]
+        X_test = X_total[test_data_idxs]
+        y_test = y_total[test_data_idxs]
 
         train_dataidxs = []
         for k in fine_split['train']:
@@ -169,16 +164,22 @@ def partition_data(dataset, datadir, logdir, partition, n_parties, beta=0.4):
 
         X_train = X_total[train_dataidxs]
         y_train = y_total[train_dataidxs]
+    elif dataset == 'miniImageNet':
+        X_train, y_train, X_test, y_test = load_miniImageNet(datadir)
+    elif dataset == '20newsgroup' or dataset == 'fewrel' or dataset == 'huffpost':
+        X_train, y_train, X_test, y_test = load_text_data(datadir, dataset)
+    elif dataset == 'tinyimagenet':
+        X_train, y_train, X_test, y_test = load_tinyimagenet_data(datadir)
+    else:
+        raise ValueError('Unrecognized dataset')
 
     if partition == "homo" or partition == "iid":
         n_train = y_train.shape[0]
         idxs = np.random.permutation(n_train)
         batch_idxs = np.array_split(idxs, n_parties)
-        net_dataidx_map = {i: batch_idxs[i] for i in range(n_parties)}
-
+        net_data_idx_map = {i: batch_idxs[i] for i in range(n_parties)}
     elif partition == "noniid-labeldir" or partition == "noniid":
         min_size = 0
-
         min_require_size = 10
         K = 10
         if dataset == 'cifar100':
@@ -188,13 +189,14 @@ def partition_data(dataset, datadir, logdir, partition, n_parties, beta=0.4):
             # min_require_size = 100
         #
         N = y_train.shape[0]
-        net_dataidx_map = {}
+        net_data_idx_map = {}
 
         while min_size < min_require_size:
             idx_batch = [[] for _ in range(n_parties)]
-            class_distribute=[]
+            class_client_cnt = []
             if dataset == 'FC100':
                 train_classes = fine_split['train']
+                class_client_cnt = [[0] * n_parties for _ in range(100)]
             elif dataset == 'miniImageNet':
                 train_classes = list(range(64))
             elif dataset == '20newsgroup':
@@ -205,8 +207,8 @@ def partition_data(dataset, datadir, logdir, partition, n_parties, beta=0.4):
                                  39, 40, 41, 43, 44, 45, 46, 48, 49, 50, 52, 53, 56, 57, 58,
                                  59, 61, 62, 63, 64, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75,
                                  76, 77, 78]
-            elif dataset=='huffpost':
-                train_classes=list(range(20))
+            elif dataset == 'huffpost':
+                train_classes = list(range(20))
 
             for k in train_classes:
                 idx_k = np.where(y_train == k)[0]
@@ -216,7 +218,7 @@ def partition_data(dataset, datadir, logdir, partition, n_parties, beta=0.4):
                 proportions = proportions / proportions.sum()
                 proportions = (np.cumsum(proportions) * len(idx_k)).astype(int)[:-1]
 
-                class_distribute.append([len(one) for one in np.split(idx_k, proportions)])
+                class_client_cnt[k] = [len(one) for one in np.split(idx_k, proportions)]
 
                 idx_batch = [idx_j + idx.tolist() for idx_j, idx in zip(idx_batch, np.split(idx_k, proportions))]
                 min_size = min([len(idx_j) for idx_j in idx_batch])
@@ -224,18 +226,18 @@ def partition_data(dataset, datadir, logdir, partition, n_parties, beta=0.4):
                 #     if np.min(proportions) < 200:
                 #         min_size = 0
                 #         break
-                #print(np.split(idx_k, proportions))
-            #print(np.stack(class_distribute,0))
-            #if args.dataset=='20newsgroup' and
-            #print(1/0)
-
+                # print(np.split(idx_k, proportions))
+            # print(np.stack(class_distribute,0))
+            # if args.dataset=='20newsgroup' and
+            # print(1/0)
 
         for j in range(n_parties):
             np.random.shuffle(idx_batch[j])
-            net_dataidx_map[j] = idx_batch[j]
+            net_data_idx_map[j] = idx_batch[j]
 
-    traindata_cls_counts = record_net_data_stats(y_train, net_dataidx_map, logdir)
-    return (X_train, y_train, X_test, y_test, net_dataidx_map, traindata_cls_counts)
+    # client_class_cnt = record_net_data_stats(y_train, net_data_idx_map, logdir)
+    client_class_cnt = np.array(class_client_cnt).transpose()
+    return (X_train, y_train, X_test, y_test, net_data_idx_map, client_class_cnt)
 
 
 def get_trainable_parameters(net, device='cpu'):

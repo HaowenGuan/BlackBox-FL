@@ -26,14 +26,15 @@ def get_batch_weight(labels, class_client_weight):
 
 def compute_backward_flow_G_dis(z, y_onehot, labels,
                                 generator, student, teacher,
-                                weight, num_clients, train_fedgen_feature=False):
+                                weight, num_clients, train_fedgen_feature=False,
+                                device='cuda'):
     lambda_cls = 1.0
     lambda_dis = 1.0
-    # cls_criterion = nn.CrossEntropyLoss().cuda()
-    cls_criterion = nn.CrossEntropyLoss(reduction='mean').cuda()
-    diversity_criterion = DiversityLoss(metric='l1').cuda()
+    # cls_criterion = nn.CrossEntropyLoss().to(device)
+    cls_criterion = nn.CrossEntropyLoss(reduction='mean').to(device)
+    diversity_criterion = DiversityLoss(metric='l1').to(device)
 
-    y = torch.Tensor(labels).long().cuda()
+    y = torch.Tensor(labels).long().to(device)
 
     fake = generator(z, y_onehot)
 
@@ -99,17 +100,17 @@ class DiversityLoss(nn.Module):
         return torch.exp(torch.mean(-noise_dist * layer_dist))
 
 
-def set_client_from_params(mdl, params):
-    dict_param = copy.deepcopy(dict(mdl.state_dict()))
-    idx = 0
-    for name, param in dict(mdl.state_dict()).items():
-        weights = param.data
-        length = len(weights.reshape(-1))
-        dict_param[name].data.copy_(torch.tensor(params[idx:idx + length].reshape(weights.shape)).to(device))
-        idx += length
-
-    mdl.load_state_dict(dict_param)
-    return mdl
+# def set_client_from_params(mdl, params):
+#     dict_param = copy.deepcopy(dict(mdl.state_dict()))
+#     idx = 0
+#     for name, param in dict(mdl.state_dict()).items():
+#         weights = param.data
+#         length = len(weights.reshape(-1))
+#         dict_param[name].data.copy_(torch.tensor(params[idx:idx + length].reshape(weights.shape)).to(device))
+#         idx += length
+#
+#     mdl.load_state_dict(dict_param)
+#     return mdl
 
 
 # # --- Evaluate a NN model
@@ -166,7 +167,10 @@ def local_to_global_knowledge_distillation(s_model, g_model, c_models,
     num_clients, num_classes = client_class_num.shape
     print('Number of clients:', num_clients)
     print('Number of classes:', num_classes)
-    optimizer_D = torch.optim.SGD(s_model.parameters(), lr=glb_lr, weight_decay=weight_decay)
+    for params in s_model.parameters():
+        params.requires_grad = True
+    optimizer_D = torch.optim.SGD(s_model.parameters(), lr=glb_lr, momentum=0.9,
+                          weight_decay=weight_decay)
     optimizer_G = torch.optim.Adam(g_model.parameters(), lr=gen_lr)
     iterations = 10
     inner_round_g = 1
@@ -184,11 +188,11 @@ def local_to_global_knowledge_distillation(s_model, g_model, c_models,
     for e in range(iterations):
         print('FedFTG Epoch:', e)
         labels = labels_all[e * batch_size:(e * batch_size + batch_size)]
-        batch_weight = torch.Tensor(get_batch_weight(labels, class_client_weight)).cuda()
+        batch_weight = torch.Tensor(get_batch_weight(labels, class_client_weight)).to(device)
         onehot = np.zeros((batch_size, num_classes))
         onehot[np.arange(batch_size), labels] = 1
-        y_onehot = torch.Tensor(onehot).cuda()
-        z = torch.randn((batch_size, nz, 1, 1)).cuda()
+        y_onehot = torch.Tensor(onehot).to(device)
+        z = torch.randn((batch_size, nz, 1, 1)).to(device)
 
         ############## train generator ##############
         s_model.eval()
@@ -197,45 +201,54 @@ def local_to_global_knowledge_distillation(s_model, g_model, c_models,
         loss_md_total = 0
         loss_cls_total = 0
         loss_ap_total = 0
-        for _ in range(inner_round_g):
+        for i in range(inner_round_g):
             for client_i, c_model in enumerate(c_models):
                 optimizer_G.zero_grad()
-                loss, loss_md, loss_cls, loss_ap = compute_backward_flow_G_dis(z, y_onehot, labels, g_model,
-                                                                                     s_model, c_model,
-                                                                                     batch_weight[:, client_i], num_clients)
+                loss, loss_md, loss_cls, loss_ap = compute_backward_flow_G_dis(z, y_onehot, labels,
+                                                                               g_model, s_model, c_model,
+                                                                               batch_weight[:, client_i], num_clients,
+                                                                               device=device)
                 loss_G += loss
+                # print(f'Client {client_i} Generator loss_md: {loss_md}, loss_cls: {loss_cls}, loss_ap: {loss_ap}')
                 loss_md_total += loss_md
                 loss_cls_total += loss_cls
                 loss_ap_total += loss_ap
                 optimizer_G.step()
+        print(f'Generator loss_md: {loss_md_total}, loss_cls: {loss_cls_total}, loss_ap: {loss_ap_total}')
 
-        fake = g_model(z, y_onehot)
-        import matplotlib
-        matplotlib.use('Agg')  # Use the 'Agg' backend which does not require a GUI
-        import matplotlib.pyplot as plt
-        for i in range(10):
-            image = fake[i].detach().cpu().numpy().transpose(1, 2, 0)
-            plt.imshow(image)
-            plt.title(f'fake{i}_class{labels[i]}')
-            plt.show()
-            plt.savefig(f'fake{i}_class{labels[i]}.png')
-        exit(0)
+        # fake = g_model(z, y_onehot)
+        # import matplotlib
+        # matplotlib.use('Agg')  # Use the 'Agg' backend which does not require a GUI
+        # import matplotlib.pyplot as plt
+        # for i in range(10):
+        #     image = fake[i].detach().cpu().numpy().transpose(1, 2, 0)
+        #     plt.imshow(image)
+        #     plt.title(f'fake{i}_class{labels[i]}')
+        #     plt.show()
+        #     plt.savefig(f'fake{i}_class{labels[i]}.png')
+        # exit(0)
 
         ############## train student model ##############
         s_model.train()
         g_model.eval()
-        for _ in range(inner_round_d):
+        MSEloss = nn.MSELoss()
+        for i in range(inner_round_d):
             optimizer_D.zero_grad()
             fake = g_model(z, y_onehot).detach()
             s_logit = s_model(fake, True)[2]
             c_logit_merge = 0
             for client_i, c_model in enumerate(c_models):
                 c_logit = c_model(fake, True)[2].detach()
-                print(batch_weight[:, client_i][:, np.newaxis].repeat(1, num_classes).shape)
+                # print(batch_weight[:, client_i][:, np.newaxis].repeat(1, num_classes).shape)
                 c_logit_merge += F.softmax(c_logit, dim=1) * batch_weight[:, client_i][:, np.newaxis].repeat(1, num_classes)
             loss_D = torch.mean(-F.log_softmax(s_logit, dim=1) * c_logit_merge)
+            # loss_D = MSEloss(s_logit, c_logit_merge)
+            # print(f'Round {i} Student loss:', loss_D)
             loss_D.backward()
             optimizer_D.step()
+
+        print(f'Student loss:', loss_D)
+    print(f'global lr {glb_lr}')
 
         # if (e + 1) % print_per == 0:
         #     loss_trn, acc_trn = get_acc_loss(trn_x, trn_y, s_model, dataset_name)
@@ -247,8 +260,8 @@ def local_to_global_knowledge_distillation(s_model, g_model, c_models,
         #     s_model.train()
 
     # Freeze model
-    for params in s_model.parameters():
-        params.requires_grad = False
+    # for params in s_model.parameters():
+    #     params.requires_grad = False
     s_model.eval()
 
     return s_model

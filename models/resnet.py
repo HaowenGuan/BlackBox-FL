@@ -42,6 +42,7 @@ class BasicBlock(nn.Module):
             dilation: int = 1,
             norm_layer: Optional[Callable[..., nn.Module]] = None
     ) -> None:
+
         super(BasicBlock, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -148,6 +149,7 @@ class ResNet(nn.Module):
             replace_stride_with_dilation: Optional[List[bool]] = None,
             norm_layer: Optional[Callable[..., nn.Module]] = None
     ) -> None:
+
         super(ResNet, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -196,8 +198,15 @@ class ResNet(nn.Module):
                 elif isinstance(m, BasicBlock):
                     nn.init.constant_(m.bn2.weight, 0)  # type: ignore[arg-type]
 
-    def _make_layer(self, block: Type[Union[BasicBlock, Bottleneck]], planes: int, blocks: int,
-                    stride: int = 1, dilate: bool = False) -> nn.Sequential:
+    def _make_layer(
+            self,
+            block: Type[Union[BasicBlock, Bottleneck]],
+            planes: int,
+            blocks: int,
+            stride: int = 1,
+            dilate: bool = False
+    ) -> nn.Sequential:
+
         norm_layer = self._norm_layer
         downsample = None
         previous_dilation = self.dilation

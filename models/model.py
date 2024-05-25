@@ -3,12 +3,24 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 import torchvision.models as models
-from resnetcifar import ResNet18_cifar10, ResNet50_cifar10
+from models.resnetcifar import ResNet18_cifar10, ResNet50_cifar10
 from torch.distributions import Bernoulli
-from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
-from torchtext.vocab import vocab, Vectors, GloVe
+from torchtext.vocab import GloVe
 from embedding.meta import RNN
-from embedding.auxiliary.factory import get_embedding
+from torch.hub import load_state_dict_from_url
+
+
+model_urls = {
+    'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
+    'resnet34': 'https://download.pytorch.org/models/resnet34-333f7ec4.pth',
+    'resnet50': 'https://download.pytorch.org/models/resnet50-19c8e357.pth',
+    'resnet101': 'https://download.pytorch.org/models/resnet101-5d3b4d8f.pth',
+    'resnet152': 'https://download.pytorch.org/models/resnet152-b121ed2d.pth',
+    'resnext50_32x4d': 'https://download.pytorch.org/models/resnext50_32x4d-7cdf4587.pth',
+    'resnext101_32x8d': 'https://download.pytorch.org/models/resnext101_32x8d-8ba56ff5.pth',
+    'wide_resnet50_2': 'https://download.pytorch.org/models/wide_resnet50_2-95faca4d.pth',
+    'wide_resnet101_2': 'https://download.pytorch.org/models/wide_resnet101_2-32ee1156.pth',
+}
 
 
 def l2_normalize(x):
@@ -33,7 +45,7 @@ class DropBlock(nn.Module):
 
             bernoulli = Bernoulli(gamma)
             mask = bernoulli.sample(
-                (batch_size, channels, height - (self.block_size - 1), width - (self.block_size - 1))).cuda()
+                (batch_size, channels, height - (self.block_size - 1), width - (self.block_size - 1))).to(x.device)
             # print((x.sample[-2], x.sample[-1]))
             block_mask = self._compute_block_mask(mask)
             # print (block_mask.size())
@@ -61,8 +73,8 @@ class DropBlock(nn.Module):
                 # - left_padding,
                 torch.arange(self.block_size).repeat(self.block_size),  # - left_padding
             ]
-        ).t().cuda()
-        offsets = torch.cat((torch.zeros(self.block_size ** 2, 2).cuda().long(), offsets.long()), 1)
+        ).t().to(mask.device)
+        offsets = torch.cat((torch.zeros(self.block_size ** 2, 2).long().to(mask.device), offsets.long()), 1)
 
         if nr_blocks > 0:
             non_zero_idxs = non_zero_idxs.repeat(self.block_size ** 2, 1)
@@ -735,33 +747,33 @@ class ModelFedCon(nn.Module):
         super(ModelFedCon, self).__init__()
 
         if base_model == "resnet50-cifar10" or base_model == "resnet50-cifar100" or base_model == "resnet50-smallkernel" or base_model == "resnet50":
-            basemodel = ResNet50_cifar10()
-            self.features = nn.Sequential(*list(basemodel.children())[:-1])
-            num_ftrs = basemodel.fc.in_features
+            temp_model = ResNet50_cifar10()
+            self.features = nn.Sequential(*list(temp_model.children())[:-1])
+            num_feature = temp_model.fc.in_features
         elif base_model == "resnet18-cifar10" or base_model == "resnet18":
-            basemodel = ResNet18_cifar10()
-            self.features = nn.Sequential(*list(basemodel.children())[:-1])
-            num_ftrs = basemodel.fc.in_features
+            temp_model = ResNet18_cifar10()
+            self.features = nn.Sequential(*list(temp_model.children())[:-1])
+            num_feature = temp_model.fc.in_features
         elif base_model == "mlp":
             self.features = MLP_header()
-            num_ftrs = 512
+            num_feature = 512
         elif base_model == 'simple-cnn':
             self.features = SimpleCNN_header(input_dim=(16 * 5 * 5), hidden_dims=[120, 84], output_dim=n_classes)
-            num_ftrs = 84
+            num_feature = 84
         elif base_model == 'simple-cnn-mnist':
             self.features = SimpleCNNMNIST_header(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=n_classes)
-            num_ftrs = 84
+            num_feature = 84
 
         # summary(self.features.to('cuda:0'), (3,32,32))
         # print("features:", self.features)
         # projection MLP
-        self.l1 = nn.Linear(num_ftrs, num_ftrs)
-        self.l2 = nn.Linear(num_ftrs, out_dim)
+        self.l1 = nn.Linear(num_feature, num_feature)
+        self.l2 = nn.Linear(num_feature, out_dim)
 
         # last layer
         self.l3 = nn.Linear(out_dim, n_classes)
 
-    def _get_basemodel(self, model_name):
+    def _get_base_model(self, model_name):
         try:
             model = self.model_dict[model_name]
             # print("Feature extractor:", model_name)
@@ -789,41 +801,41 @@ class ModelFedCon_noheader(nn.Module):
         super(ModelFedCon_noheader, self).__init__()
 
         if base_model == "resnet50":
-            basemodel = models.resnet50(pretrained=False)
-            self.features = nn.Sequential(*list(basemodel.children())[:-1])
-            num_ftrs = basemodel.fc.in_features
+            temp_model = models.resnet50(pretrained=False)
+            self.features = nn.Sequential(*list(temp_model.children())[:-1])
+            num_feature = temp_model.fc.in_features
         elif base_model == "resnet18":
-            basemodel = models.resnet18(pretrained=False)
-            self.features = nn.Sequential(*list(basemodel.children())[:-1])
-            num_ftrs = basemodel.fc.in_features
+            temp_model = models.resnet18(pretrained=False)
+            self.features = nn.Sequential(*list(temp_model.children())[:-1])
+            num_feature = temp_model.fc.in_features
         elif base_model == "resnet50-cifar10" or base_model == "resnet50-cifar100" or base_model == "resnet50-smallkernel":
-            basemodel = ResNet50_cifar10()
-            self.features = nn.Sequential(*list(basemodel.children())[:-1])
-            num_ftrs = basemodel.fc.in_features
+            temp_model = ResNet50_cifar10()
+            self.features = nn.Sequential(*list(temp_model.children())[:-1])
+            num_feature = temp_model.fc.in_features
         elif base_model == "resnet18-cifar10":
-            basemodel = ResNet18_cifar10()
-            self.features = nn.Sequential(*list(basemodel.children())[:-1])
-            num_ftrs = basemodel.fc.in_features
+            temp_model = ResNet18_cifar10()
+            self.features = nn.Sequential(*list(temp_model.children())[:-1])
+            num_feature = temp_model.fc.in_features
         elif base_model == "mlp":
             self.features = MLP_header()
-            num_ftrs = 512
+            num_feature = 512
         elif base_model == 'simple-cnn':
             self.features = SimpleCNN_header(input_dim=(16 * 5 * 5), hidden_dims=[120, 84], output_dim=n_classes)
-            num_ftrs = 84
+            num_feature = 84
         elif base_model == 'simple-cnn-mnist':
             self.features = SimpleCNNMNIST_header(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=n_classes)
-            num_ftrs = 84
+            num_feature = 84
 
         # summary(self.features.to('cuda:0'), (3,32,32))
         # print("features:", self.features)
         # projection MLP
-        # self.l1 = nn.Linear(num_ftrs, num_ftrs)
-        # self.l2 = nn.Linear(num_ftrs, out_dim)
+        # self.l1 = nn.Linear(num_feature, num_feature)
+        # self.l2 = nn.Linear(num_feature, out_dim)
 
         # last layer
-        self.l3 = nn.Linear(num_ftrs, n_classes)
+        self.l3 = nn.Linear(num_feature, n_classes)
 
-    def _get_basemodel(self, model_name):
+    def _get_base_model(self, model_name):
         try:
             model = self.model_dict[model_name]
             # print("Feature extractor:", model_name)
@@ -845,66 +857,77 @@ class ModelFedCon_noheader(nn.Module):
         return h, h, y
 
 
-class ModelFed_Adp(nn.Module):
+class ImageModel(nn.Module):
 
     def __init__(self, base_model, out_dim, n_classes, total_classes, net_configs=None, args=None):
-        super(ModelFed_Adp, self).__init__()
+        """
+        Initialize the image model
+        Args:
+            base_model: str, base model name
+            out_dim: int, output feature dimension
+            n_classes: int, number of classes
+        """
+        super(ImageModel, self).__init__()
 
         if base_model == "resnet50-cifar10" or base_model == "resnet50-cifar100" or base_model == "resnet50-smallkernel" or base_model == "resnet50":
-            basemodel = ResNet50_cifar10()
-            self.features = nn.Sequential(*list(basemodel.children())[:-1])
-            num_ftrs = basemodel.fc.in_features
+            temp_model = ResNet50_cifar10()
+            self.features = nn.Sequential(*list(temp_model.children())[:-1])
+            num_feature = temp_model.fc.in_features
         elif base_model == "resnet18-cifar10" or base_model == "resnet18":
-            basemodel = ResNet18_cifar10()
-            self.features = nn.Sequential(*list(basemodel.children())[:-1])
-            num_ftrs = basemodel.fc.in_features
+            temp_model = ResNet18_cifar10()
+            if args.server_pretrained:
+                state_dict = load_state_dict_from_url(model_urls['resnet18'], progress=True)
+                del state_dict['conv1.weight']
+                logs = temp_model.load_state_dict(state_dict, strict=False)
+                print(logs)
+            self.features = nn.Sequential(*list(temp_model.children())[:-1])
+            num_feature = temp_model.fc.in_features
         elif base_model == "mlp":
             self.features = MLP_header()
-            num_ftrs = 512
+            num_feature = 512
         elif base_model == 'simple-cnn':
             self.features = SimpleCNN_header(input_dim=(16 * 18 * 18 if args.dataset == 'miniImageNet' else 16 * 5 * 5),
                                              hidden_dims=[120, 84], output_dim=n_classes)
-            num_ftrs = 84
+            num_feature = 84
         elif base_model == 'simple-cnn-mnist':
             self.features = SimpleCNNMNIST_header(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=n_classes)
-            num_ftrs = 84
+            num_feature = 84
         elif base_model == 'resnet12':
-
             if args.dataset=='FC100':
                 self.features = resnet12(avg_pool=True, drop_rate=0.1, dropblock_size=2)
-                #num_ftrs=2560
-                num_ftrs=640
+                #num_feature=2560
+                num_feature=640
             else:
                 self.features = resnet12(avg_pool=True, drop_rate=0.1)
-                #num_ftrs = 16000
-                num_ftrs = 640
-
-        # summary(self.features.to('cuda:0'), (3,32,32))
-        # print("features:", self.features)
-        # projection MLP
-        self.l1 = nn.Linear(num_ftrs, num_ftrs)
-        self.l2 = nn.Linear(num_ftrs, out_dim)
+                #num_feature = 16000
+                num_feature = 640
 
         # last layer for few
-        self.few_classify = nn.Linear(num_ftrs, n_classes)
+        self.few_classify = nn.Linear(num_feature, n_classes)
 
+        # projection MLP
+        self.l1 = nn.Linear(num_feature, num_feature)
+        self.l2 = nn.Linear(num_feature, out_dim)
         self.all_classify = nn.Linear(out_dim, total_classes)
 
-        encoder_layer = nn.TransformerEncoderLayer(d_model=num_ftrs, nhead=4)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=num_feature, nhead=4)
         self.transformer= nn.TransformerEncoder(encoder_layer=encoder_layer, num_layers=1)
 
-        print(self.state_dict().keys())
 
-    def _get_basemodel(self, model_name):
+    def _get_base_model(self, model_name):
         try:
             model = self.model_dict[model_name]
             # print("Feature extractor:", model_name)
             return model
         except:
-            raise ("Invalid model name. Check the config file and pass one of: resnet18 or resnet50")
+            raise "Invalid model name. Check the config file and pass one of: resnet18 or resnet50"
 
-    def forward(self, x_ori, all_classify=False):
-        h = self.features(x_ori)
+    def forward(self, x_input, all_classify=False):
+        """
+        :param x_input: input image
+        :param all_classify: if True, classify all classes, else classify few classes
+        """
+        h = self.features(x_input)
 
         # print("h before:", h)
         # print("h size:", h.size())
@@ -915,7 +938,9 @@ class ModelFed_Adp(nn.Module):
         #x = self.l2(x)
 
         if not all_classify:
-            x=self.transformer(ebd)
+            print('ebd:', ebd.size())
+            x = self.transformer(ebd)
+            print('transformer:', x.size())
             y = self.few_classify(x)
         else:
             x = self.l1(ebd)
