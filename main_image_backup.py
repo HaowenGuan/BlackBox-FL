@@ -185,7 +185,7 @@
 #     parser.add_argument('--server_momentum', type=float, default=0, help='the server momentum (FedAvgM)')
 #     args = parser.parse_args()
 #
-#     args.config_file = "configs/image_FC100.yaml"
+#     args.config_file = "configs/FC100.yaml"
 #     if args.config_file is not None:
 #         # Read the configuration from a yaml file
 #         with open(args.config_file, 'r') as file:
@@ -197,7 +197,7 @@
 #
 #     # Save the configuration to a yaml file
 #     # config_dict = vars(args)
-#     # yaml_file = 'configs/image_FC100.yaml'
+#     # yaml_file = 'configs/FC100.yaml'
 #     # with open(yaml_file, 'w') as file:
 #     #     yaml.dump(config_dict, file, default_flow_style=False)
 #     # print('The configuration file is saved to {}'.format(yaml_file))

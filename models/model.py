@@ -859,7 +859,7 @@ class ModelFedCon_noheader(nn.Module):
 
 class ImageModel(nn.Module):
 
-    def __init__(self, base_model, out_dim, n_classes, total_classes, net_configs=None, args=None):
+    def __init__(self, base_model, out_dim, n_classes, total_classes, args=None):
         """
         Initialize the image model
         Args:
@@ -902,16 +902,17 @@ class ImageModel(nn.Module):
                 #num_feature = 16000
                 num_feature = 640
 
-        # last layer for few
-        self.few_classify = nn.Linear(num_feature, n_classes)
+
 
         # projection MLP
         self.l1 = nn.Linear(num_feature, num_feature)
         self.l2 = nn.Linear(num_feature, out_dim)
         self.all_classify = nn.Linear(out_dim, total_classes)
 
+        # Output layer for few classification
         encoder_layer = nn.TransformerEncoderLayer(d_model=num_feature, nhead=4)
         self.transformer= nn.TransformerEncoder(encoder_layer=encoder_layer, num_layers=1)
+        self.few_classify = nn.Linear(num_feature, n_classes)
 
 
     def _get_base_model(self, model_name):
@@ -927,27 +928,20 @@ class ImageModel(nn.Module):
         :param x_input: input image
         :param all_classify: if True, classify all classes, else classify few classes
         """
-        h = self.features(x_input)
+        ebd = self.features(x_input)
+        # remove all dimensions with size 1
+        ebd = ebd.squeeze()
 
-        # print("h before:", h)
-        # print("h size:", h.size())
-        ebd = h.squeeze()
-        # print("h after:", h)
-        #x = self.l1(h)
-        #x = F.relu(x)
-        #x = self.l2(x)
-
-        if not all_classify:
-            print('ebd:', ebd.size())
-            x = self.transformer(ebd)
-            print('transformer:', x.size())
-            y = self.few_classify(x)
+        if all_classify:
+            h = self.l1(ebd)
+            h = F.relu(h)
+            h = self.l2(h)
+            y = self.all_classify(h)
         else:
-            x = self.l1(ebd)
-            x = F.relu(x)
-            x = self.l2(x)
-            y = self.all_classify(x)
-        return ebd, x, y
+            h = self.transformer(ebd)
+            y = self.few_classify(h)
+
+        return ebd, h, y
 
 
 class WORDEBD(nn.Module):

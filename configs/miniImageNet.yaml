@@ -36,7 +36,14 @@ model: resnet18
 model_buffer_size: 1
 mu: 1
 n_parties: 10
-net_config: null
+net_config:
+  train_client_class: 20
+  train_support_num: 2
+  train_query_num: 2
+  test_client_class: 5
+  test_support_num: 5
+  test_query_num: 5
+
 normal_model: 0
 num_test_tasks: 10
 num_train_tasks: 1
