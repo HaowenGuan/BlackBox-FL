@@ -875,7 +875,7 @@ class ImageModel(nn.Module):
             num_feature = temp_model.fc.in_features
         elif base_model == "resnet18-cifar10" or base_model == "resnet18":
             temp_model = ResNet18_cifar10()
-            if args.server_pretrained:
+            if args['server_pretrained']:
                 state_dict = load_state_dict_from_url(model_urls['resnet18'], progress=True)
                 del state_dict['conv1.weight']
                 logs = temp_model.load_state_dict(state_dict, strict=False)
@@ -886,14 +886,14 @@ class ImageModel(nn.Module):
             self.features = MLP_header()
             num_feature = 512
         elif base_model == 'simple-cnn':
-            self.features = SimpleCNN_header(input_dim=(16 * 18 * 18 if args.dataset == 'miniImageNet' else 16 * 5 * 5),
+            self.features = SimpleCNN_header(input_dim=(16 * 18 * 18 if args['dataset'] == 'miniImageNet' else 16 * 5 * 5),
                                              hidden_dims=[120, 84], output_dim=n_classes)
             num_feature = 84
         elif base_model == 'simple-cnn-mnist':
             self.features = SimpleCNNMNIST_header(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=n_classes)
             num_feature = 84
         elif base_model == 'resnet12':
-            if args.dataset=='FC100':
+            if args['dataset']=='FC100':
                 self.features = resnet12(avg_pool=True, drop_rate=0.1, dropblock_size=2)
                 #num_feature=2560
                 num_feature=640
@@ -985,14 +985,14 @@ class LSTMAtt(nn.Module):
     def __init__(self, ebd, out_dim, n_classes, total_classes, args=None):
         super(LSTMAtt, self).__init__()
 
-        # ebd = WORDEBD(args.finetune_ebd)
+        # ebd = WORDEBD(args['finetune_ebd'])
 
         self.args = args
-        if args.dataset=='20newsgroup':
+        if args['dataset']=='20newsgroup':
             self.max_text_len=500
-        elif args.dataset=='fewrel':
+        elif args['dataset']=='fewrel':
             self.max_text_len=38
-        elif args.dataset=='huffpost':
+        elif args['dataset']=='huffpost':
             self.max_text_len=44
 
         self.ebd = ebd
@@ -1001,8 +1001,8 @@ class LSTMAtt(nn.Module):
         self.input_dim = self.ebd.embedding_dim  # + self.aux.embedding_dim
 
         # Default settings in induction encoder
-        u = args.induct_rnn_dim
-        da = args.induct_att_dim
+        u = args['induct_rnn_dim']
+        da = args['induct_att_dim']
 
         self.rnn = RNN(self.input_dim, u, 1, True, 0.5)
 

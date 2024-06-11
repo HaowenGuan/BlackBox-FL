@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import copy
+import wandb
 
 def generate_labels(number, class_num):
     labels = np.arange(number)
@@ -38,12 +39,9 @@ def compute_backward_flow_G_dis(z, y_onehot, labels,
 
     fake = generator(z, y_onehot)
 
-    t_logit = teacher(fake, True)[0]
-    # print("t_logit: ", len(t_logit), t_logit[0].shape, t_logit[1].shape, t_logit[2].shape)
-    s_logit = student(fake, True)[0]
-    # print("s_logit: ", len(s_logit), s_logit[0].shape, s_logit[1].shape, s_logit[2].shape)
-    loss_md = - torch.mean(
-        torch.mean(torch.abs(s_logit - t_logit.detach()), dim=1) * weight)
+    _, _, t_logit = teacher(fake, True)
+    _, _, s_logit = student(fake, True)
+    loss_md = - torch.mean(torch.mean(torch.abs(s_logit - t_logit.detach()), dim=1) * weight)
 
     # loss_cls = cls_criterion(t_logit, y)
     loss_cls = torch.mean(cls_criterion(t_logit, y) * weight.squeeze())
@@ -154,10 +152,23 @@ class DiversityLoss(nn.Module):
 #     return loss_overall, acc_overall / n_tst
 
 
-def local_to_global_knowledge_distillation(s_model, g_model, c_models,
-                                      client_class_num, glb_lr, gen_lr,
-                                      batch_size, print_per, weight_decay,
-                                      dataset_name, trn_x, trn_y, tst_x, tst_y, device='cuda'):
+def local_to_global_knowledge_distillation(
+        args,
+        epoch,
+        s_model,
+        g_model,
+        c_models,
+        client_class_num,
+        glb_model_lr,
+        gen_model_lr,
+        batch_size,
+        weight_decay,
+        iterations,
+        g_inner_round,
+        d_inner_round,
+        n_cls,
+        device='cuda',
+        **kwargs):
     """
     Local to global knowledge distillation using FedFTG.
     https://arxiv.org/abs/2203.09249
@@ -165,17 +176,10 @@ def local_to_global_knowledge_distillation(s_model, g_model, c_models,
     s_model.to(device)
     g_model.to(device)
     num_clients, num_classes = client_class_num.shape
-    print('Number of clients:', num_clients)
-    print('Number of classes:', num_classes)
     for params in s_model.parameters():
         params.requires_grad = True
-    optimizer_D = torch.optim.SGD(s_model.parameters(), lr=glb_lr, momentum=0.9,
-                          weight_decay=weight_decay)
-    optimizer_G = torch.optim.Adam(g_model.parameters(), lr=gen_lr)
-    iterations = 10
-    inner_round_g = 1
-    inner_round_d = 5
-    nz = 100 if dataset_name == 'CIFAR10' or dataset_name == 'mnist' else 256
+    optimizer_D = torch.optim.SGD(s_model.parameters(), lr=glb_model_lr, momentum=0.9, weight_decay=weight_decay)
+    optimizer_G = torch.optim.Adam(g_model.parameters(), lr=gen_model_lr)
 
     for params in s_model.parameters():
         params.requires_grad = True
@@ -186,13 +190,12 @@ def local_to_global_knowledge_distillation(s_model, g_model, c_models,
     labels_all = generate_labels(iterations * batch_size, class_num)
     print('Start training generator and server model')
     for e in range(iterations):
-        print('FedFTG Epoch:', e)
         labels = labels_all[e * batch_size:(e * batch_size + batch_size)]
         batch_weight = torch.Tensor(get_batch_weight(labels, class_client_weight)).to(device)
         onehot = np.zeros((batch_size, num_classes))
         onehot[np.arange(batch_size), labels] = 1
         y_onehot = torch.Tensor(onehot).to(device)
-        z = torch.randn((batch_size, nz, 1, 1)).to(device)
+        z = torch.randn((batch_size, n_cls, 1, 1)).to(device)
 
         ############## train generator ##############
         s_model.eval()
@@ -201,7 +204,7 @@ def local_to_global_knowledge_distillation(s_model, g_model, c_models,
         loss_md_total = 0
         loss_cls_total = 0
         loss_ap_total = 0
-        for i in range(inner_round_g):
+        for i in range(g_inner_round):
             for client_i, c_model in enumerate(c_models):
                 optimizer_G.zero_grad()
                 loss, loss_md, loss_cls, loss_ap = compute_backward_flow_G_dis(z, y_onehot, labels,
@@ -209,12 +212,14 @@ def local_to_global_knowledge_distillation(s_model, g_model, c_models,
                                                                                batch_weight[:, client_i], num_clients,
                                                                                device=device)
                 loss_G += loss
-                # print(f'Client {client_i} Generator loss_md: {loss_md}, loss_cls: {loss_cls}, loss_ap: {loss_ap}')
                 loss_md_total += loss_md
                 loss_cls_total += loss_cls
                 loss_ap_total += loss_ap
                 optimizer_G.step()
-        print(f'Generator loss_md: {loss_md_total}, loss_cls: {loss_cls_total}, loss_ap: {loss_ap_total}')
+        if args['log_wandb']:
+            wandb.log({'KD Generator model discrepancy loss': loss_md_total}, step=epoch)
+            wandb.log({'KD Generator classification loss': loss_cls_total}, step=epoch)
+            wandb.log({'KD Generator diversity loss': loss_ap_total}, step=epoch)
 
         # fake = g_model(z, y_onehot)
         # import matplotlib
@@ -232,23 +237,24 @@ def local_to_global_knowledge_distillation(s_model, g_model, c_models,
         s_model.train()
         g_model.eval()
         MSEloss = nn.MSELoss()
-        for i in range(inner_round_d):
+        loss_D_total = 0
+        for i in range(d_inner_round):
             optimizer_D.zero_grad()
             fake = g_model(z, y_onehot).detach()
-            s_logit = s_model(fake, True)[2]
+            _, _, s_logit = s_model(fake, all_classify=True)
             c_logit_merge = 0
             for client_i, c_model in enumerate(c_models):
-                c_logit = c_model(fake, True)[2].detach()
-                # print(batch_weight[:, client_i][:, np.newaxis].repeat(1, num_classes).shape)
+                c_logit = c_model(fake, all_classify=True)[2].detach()
                 c_logit_merge += F.softmax(c_logit, dim=1) * batch_weight[:, client_i][:, np.newaxis].repeat(1, num_classes)
             loss_D = torch.mean(-F.log_softmax(s_logit, dim=1) * c_logit_merge)
+            loss_D_total += loss_D
             # loss_D = MSEloss(s_logit, c_logit_merge)
             # print(f'Round {i} Student loss:', loss_D)
             loss_D.backward()
             optimizer_D.step()
 
-        print(f'Student loss:', loss_D)
-    print(f'global lr {glb_lr}')
+        if args['log_wandb']:
+            wandb.log({'KD Server loss': loss_D_total}, step=epoch)
 
         # if (e + 1) % print_per == 0:
         #     loss_trn, acc_trn = get_acc_loss(trn_x, trn_y, s_model, dataset_name)

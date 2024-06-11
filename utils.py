@@ -115,9 +115,9 @@ def record_net_data_stats(y_train, net_dataidx_map, logdir):
     return net_cls_counts
 
 
-def partition_data(dataset, datadir, logdir, partition, n_parties, beta=0.4):
+def partition_data(dataset, data_dir, partition, n_parties, beta=0.4):
     if dataset == 'cifar10':
-        X_train, y_train, X_test, y_test = load_cifar10_data(datadir)
+        X_train, y_train, X_test, y_test = load_cifar10_data(data_dir)
     elif dataset == 'cifar100' or dataset == 'FC100':
         # There are 100 classes and 20 Superclasses in CIFAR100
         fine_id_coarse_id = {0: 4, 1: 1, 2: 14, 3: 8, 4: 0, 5: 6, 6: 7, 7: 7, 8: 18, 9: 3, 10: 3, 11: 14, 12: 9, 13: 18,
@@ -142,7 +142,7 @@ def partition_data(dataset, datadir, logdir, partition, n_parties, beta=0.4):
                 fine_split['valid'].append(fine_id)
             else:
                 fine_split['test'].append(fine_id)
-        X_train, y_train, X_test, y_test = load_cifar100_data(datadir)
+        X_train, y_train, X_test, y_test = load_cifar100_data(data_dir)
 
         X_total = np.concatenate([X_train, X_test], 0)
         y_total = np.concatenate([y_train, y_test], 0)
@@ -165,11 +165,11 @@ def partition_data(dataset, datadir, logdir, partition, n_parties, beta=0.4):
         X_train = X_total[train_dataidxs]
         y_train = y_total[train_dataidxs]
     elif dataset == 'miniImageNet':
-        X_train, y_train, X_test, y_test = load_miniImageNet(datadir)
+        X_train, y_train, X_test, y_test = load_miniImageNet(data_dir)
     elif dataset == '20newsgroup' or dataset == 'fewrel' or dataset == 'huffpost':
-        X_train, y_train, X_test, y_test = load_text_data(datadir, dataset)
+        X_train, y_train, X_test, y_test = load_text_data(data_dir, dataset)
     elif dataset == 'tinyimagenet':
-        X_train, y_train, X_test, y_test = load_tinyimagenet_data(datadir)
+        X_train, y_train, X_test, y_test = load_tinyimagenet_data(data_dir)
     else:
         raise ValueError('Unrecognized dataset')
 

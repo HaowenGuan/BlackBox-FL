@@ -740,8 +740,6 @@
 #         format='%(asctime)s %(levelname)-8s %(message)s',
 #         datefmt='%m-%d %H:%M', level=logging.DEBUG, filemode='w')
 #
-#     test_task_sample_seed=1
-#     np.random.seed(test_task_sample_seed)
 #     test_classes=[]
 #     test_index=[]
 #     for i in range(args.num_test_tasks):

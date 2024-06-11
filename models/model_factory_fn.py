@@ -25,19 +25,17 @@ def init_nets(num_clients, args):
     Initialize the networks for each client
     """
     nets = {net_i: None for net_i in range(num_clients)}
-    net_config = args.net_config
-    client_classes = net_config['train_client_class']
-    server_classes = args.num_classes
+    net_config = args['net_config']
+    client_classes = args['meta_config']['train_client_class']
+    server_classes = args['num_classes']
 
-    if args.mode == 'few-shot' and args.method == 'new':
-        if args.dataset == '20newsgroup':
-            ebd = WORDEBD(args.finetune_ebd)
+    if args['mode'] == 'few-shot':
         for net_i in range(num_clients):
-            if args.dataset == 'FC100' or args.dataset == 'miniImageNet':
+            if args['dataset'] == 'FC100' or args['dataset'] == 'miniImageNet':
                 net = ImageModel(net_config['model'], net_config['out_dim'], client_classes, server_classes, args)
             else:
-                net = LSTMAtt(WORDEBD(args.finetune_ebd), net_config['out_dim'], client_classes, server_classes, args)
-            net.to(args.device)
+                net = LSTMAtt(WORDEBD(args['finetune_ebd']), net_config['out_dim'], client_classes, server_classes, args)
+            net.to(args['device'])
             nets[net_i] = net
 
     model_meta_data = []
