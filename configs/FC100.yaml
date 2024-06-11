@@ -1,8 +1,8 @@
 log_wandb: True
-wandb_name: Using_KD_Generator
+wandb_name: Pretrained + KD_Generator
 device: cuda
 cuda_gpu: 0
-server_pretrained: False
+server_pretrained: True
 use_KD_Generator: True
 seed: 0
 dataset: FC100

@@ -54,8 +54,8 @@ def main_pseudocode(args, logger):
     logger.info(f'Number of clients per round: {int(args["n_parties"] * args["sample_fraction"])}')
     logger.info(f'For a total of {Color.BOLD}{args["total_epoch"]}{Color.END} round:')
     _algorithm_pseudocode(args, logger, '\t')
-    logger.info(f'{Color.BOLD}Fusing client model{Color.END} by weighted FedAvg Algorithm')
+    logger.info(f'\t{Color.BOLD}Fusing client model{Color.END} by weighted FedAvg Algorithm')
     if args['use_KD_Generator']:
-        logger.info(f'{Color.BOLD}Local to global knowledge distillation{Color.END} using Generator (FedFTG algorithm).')
-        _knowledge_distillation_generator_pseudocode(args, logger, '\t')
+        logger.info(f'\t{Color.BOLD}Local to global knowledge distillation{Color.END} using Generator (FedFTG algorithm).')
+        _knowledge_distillation_generator_pseudocode(args, logger, '\t\t')
     logger.info('#' * 100)
