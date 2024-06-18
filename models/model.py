@@ -8,6 +8,9 @@ from torch.distributions import Bernoulli
 from torchtext.vocab import GloVe
 from embedding.meta import RNN
 from torch.hub import load_state_dict_from_url
+from models.feature_extractor.vision_transformer import VisionTransformer
+from functools import partial
+import timm
 
 
 model_urls = {
@@ -743,24 +746,24 @@ class ModerateCNNContainer(nn.Module):
 
 class ModelFedCon(nn.Module):
 
-    def __init__(self, base_model, out_dim, n_classes, net_configs=None):
+    def __init__(self, encoder, out_dim, n_classes, net_configs=None):
         super(ModelFedCon, self).__init__()
 
-        if base_model == "resnet50-cifar10" or base_model == "resnet50-cifar100" or base_model == "resnet50-smallkernel" or base_model == "resnet50":
+        if encoder == "resnet50-cifar10" or encoder == "resnet50-cifar100" or encoder == "resnet50-smallkernel" or encoder == "resnet50":
             temp_model = ResNet50_cifar10()
             self.features = nn.Sequential(*list(temp_model.children())[:-1])
             num_feature = temp_model.fc.in_features
-        elif base_model == "resnet18-cifar10" or base_model == "resnet18":
+        elif encoder == "resnet18-cifar10" or encoder == "resnet18":
             temp_model = ResNet18_cifar10()
             self.features = nn.Sequential(*list(temp_model.children())[:-1])
             num_feature = temp_model.fc.in_features
-        elif base_model == "mlp":
+        elif encoder == "mlp":
             self.features = MLP_header()
             num_feature = 512
-        elif base_model == 'simple-cnn':
+        elif encoder == 'simple-cnn':
             self.features = SimpleCNN_header(input_dim=(16 * 5 * 5), hidden_dims=[120, 84], output_dim=n_classes)
             num_feature = 84
-        elif base_model == 'simple-cnn-mnist':
+        elif encoder == 'simple-cnn-mnist':
             self.features = SimpleCNNMNIST_header(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=n_classes)
             num_feature = 84
 
@@ -797,32 +800,32 @@ class ModelFedCon(nn.Module):
 
 class ModelFedCon_noheader(nn.Module):
 
-    def __init__(self, base_model, out_dim, n_classes, net_configs=None):
+    def __init__(self, encoder, out_dim, n_classes, net_configs=None):
         super(ModelFedCon_noheader, self).__init__()
 
-        if base_model == "resnet50":
+        if encoder == "resnet50":
             temp_model = models.resnet50(pretrained=False)
             self.features = nn.Sequential(*list(temp_model.children())[:-1])
             num_feature = temp_model.fc.in_features
-        elif base_model == "resnet18":
+        elif encoder == "resnet18":
             temp_model = models.resnet18(pretrained=False)
             self.features = nn.Sequential(*list(temp_model.children())[:-1])
             num_feature = temp_model.fc.in_features
-        elif base_model == "resnet50-cifar10" or base_model == "resnet50-cifar100" or base_model == "resnet50-smallkernel":
+        elif encoder == "resnet50-cifar10" or encoder == "resnet50-cifar100" or encoder == "resnet50-smallkernel":
             temp_model = ResNet50_cifar10()
             self.features = nn.Sequential(*list(temp_model.children())[:-1])
             num_feature = temp_model.fc.in_features
-        elif base_model == "resnet18-cifar10":
+        elif encoder == "resnet18-cifar10":
             temp_model = ResNet18_cifar10()
             self.features = nn.Sequential(*list(temp_model.children())[:-1])
             num_feature = temp_model.fc.in_features
-        elif base_model == "mlp":
+        elif encoder == "mlp":
             self.features = MLP_header()
             num_feature = 512
-        elif base_model == 'simple-cnn':
+        elif encoder == 'simple-cnn':
             self.features = SimpleCNN_header(input_dim=(16 * 5 * 5), hidden_dims=[120, 84], output_dim=n_classes)
             num_feature = 84
-        elif base_model == 'simple-cnn-mnist':
+        elif encoder == 'simple-cnn-mnist':
             self.features = SimpleCNNMNIST_header(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=n_classes)
             num_feature = 84
 
@@ -859,76 +862,81 @@ class ModelFedCon_noheader(nn.Module):
 
 class ImageModel(nn.Module):
 
-    def __init__(self, base_model, out_dim, n_classes, total_classes, args=None):
+    def __init__(self, encoder, client_class, total_class, pretrained):
         """
         Initialize the image model
         Args:
-            base_model: str, base model name
-            out_dim: int, output feature dimension
-            n_classes: int, number of classes
+            encoder: str, encoder name
+            client_class: int, number of classes
         """
         super(ImageModel, self).__init__()
 
-        if base_model == "resnet50-cifar10" or base_model == "resnet50-cifar100" or base_model == "resnet50-smallkernel" or base_model == "resnet50":
+        if encoder == "resnet50-cifar10" or encoder == "resnet50-cifar100" or encoder == "resnet50-smallkernel" or encoder == "resnet50":
             temp_model = ResNet50_cifar10()
-            self.features = nn.Sequential(*list(temp_model.children())[:-1])
+            self.encoder = nn.Sequential(*list(temp_model.children())[:-1])
             num_feature = temp_model.fc.in_features
-        elif base_model == "resnet18-cifar10" or base_model == "resnet18":
+        elif encoder == "resnet18-cifar10" or encoder == "resnet18":
+            print("Using resnet18")
             temp_model = ResNet18_cifar10()
-            if args['server_pretrained']:
+            if pretrained:
                 state_dict = load_state_dict_from_url(model_urls['resnet18'], progress=True)
                 del state_dict['conv1.weight']
                 logs = temp_model.load_state_dict(state_dict, strict=False)
                 print(logs)
-            self.features = nn.Sequential(*list(temp_model.children())[:-1])
+            self.encoder = nn.Sequential(*list(temp_model.children())[:-1])
             num_feature = temp_model.fc.in_features
-        elif base_model == "mlp":
-            self.features = MLP_header()
+        elif encoder == "mlp":
+            self.encoder = MLP_header()
             num_feature = 512
-        elif base_model == 'simple-cnn':
-            self.features = SimpleCNN_header(input_dim=(16 * 18 * 18 if args['dataset'] == 'miniImageNet' else 16 * 5 * 5),
-                                             hidden_dims=[120, 84], output_dim=n_classes)
+        elif encoder == 'simple-cnn':
+            self.encoder = SimpleCNN_header(input_dim=(16 * 5 * 5),
+                                             hidden_dims=[120, 84], output_dim=client_class)
             num_feature = 84
-        elif base_model == 'simple-cnn-mnist':
-            self.features = SimpleCNNMNIST_header(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=n_classes)
+        elif encoder == 'simple-cnn-mnist':
+            self.encoder = SimpleCNNMNIST_header(input_dim=(16 * 4 * 4), hidden_dims=[120, 84], output_dim=client_class)
             num_feature = 84
-        elif base_model == 'resnet12':
-            if args['dataset']=='FC100':
-                self.features = resnet12(avg_pool=True, drop_rate=0.1, dropblock_size=2)
-                #num_feature=2560
-                num_feature=640
-            else:
-                self.features = resnet12(avg_pool=True, drop_rate=0.1)
-                #num_feature = 16000
-                num_feature = 640
-
+        elif encoder == 'resnet12':
+            self.encoder = resnet12(avg_pool=True, drop_rate=0.1, dropblock_size=2)
+            #num_feature=2560
+            num_feature=640
+        elif 'clip' in encoder:
+            self.encoder = timm.create_model(encoder,
+                                          pretrained=pretrained,
+                                          img_size=32,
+                                          num_classes=0).eval()
+            self.encoder.patch_embed.num_features = 4
+            self.encoder.num_patches = 4
+            data_config = timm.data.resolve_model_data_config(self.encoder)
+            train_transform = timm.data.create_transform(**data_config, is_training=False)
+            from torchvision import transforms
+            train_transform = transforms.Compose([
+                transforms.ToPILImage(),
+                *train_transform.transforms[2:]
+            ])
+            print(train_transform)
+            exit(0)
+            num_feature = 768
+        else:
+            raise "Unknown encoder"
 
 
         # projection MLP
         self.l1 = nn.Linear(num_feature, num_feature)
-        self.l2 = nn.Linear(num_feature, out_dim)
-        self.all_classify = nn.Linear(out_dim, total_classes)
+        self.l2 = nn.Linear(num_feature, num_feature)
+        self.all_classify = nn.Linear(num_feature, total_class)
 
         # Output layer for few classification
         encoder_layer = nn.TransformerEncoderLayer(d_model=num_feature, nhead=4)
-        self.transformer= nn.TransformerEncoder(encoder_layer=encoder_layer, num_layers=1)
-        self.few_classify = nn.Linear(num_feature, n_classes)
+        self.transformer= nn.TransformerEncoder(encoder_layer=encoder_layer, num_layers=2)
+        self.few_classify = nn.Linear(num_feature, client_class)
 
-
-    def _get_base_model(self, model_name):
-        try:
-            model = self.model_dict[model_name]
-            # print("Feature extractor:", model_name)
-            return model
-        except:
-            raise "Invalid model name. Check the config file and pass one of: resnet18 or resnet50"
 
     def forward(self, x_input, all_classify=False):
         """
         :param x_input: input image
         :param all_classify: if True, classify all classes, else classify few classes
         """
-        ebd = self.features(x_input)
+        ebd = self.encoder(x_input)
         # remove all dimensions with size 1
         ebd = ebd.squeeze()
 
@@ -942,6 +950,64 @@ class ImageModel(nn.Module):
             y = self.few_classify(h)
 
         return ebd, h, y
+
+
+class ClientModel(nn.Module):
+
+    def __init__(self, encoder, num_classes, server_feature):
+        """
+        Initialize the image model
+        Args:
+            encoder: str, encoder name
+            num_classes: int, number of classes
+        """
+        super(ClientModel, self).__init__()
+
+        if encoder == "resnet18":
+            print("Using resnet18")
+            temp_model = ResNet18_cifar10()
+            self.encoder = nn.Sequential(*list(temp_model.children())[:-1])
+            num_feature = temp_model.fc.in_features
+        elif 'clip' in encoder:
+            self.encoder = VisionTransformer(
+                img_size=32,
+                patch_size=4,
+                embed_dim=192,
+                depth=12,
+                num_heads=3,
+                mlp_ratio=4,
+                qkv_bias=True,
+                norm_layer=partial(nn.LayerNorm, eps=1e-6)
+            )
+            num_feature = 192
+        else:
+            raise "Unknown encoder"
+
+        # Docking layer
+        self.docking = nn.Linear(num_feature, server_feature)
+
+        # projection MLP
+        self.l1 = nn.Linear(num_feature, num_feature)
+        self.l2 = nn.Linear(num_feature, num_feature)
+        self.all_classify = nn.Linear(num_feature, num_classes)
+
+
+    def forward(self, x_input):
+        """
+        :param x_input: input image
+        :param all_classify: if True, classify all classes, else classify few classes
+        """
+        ebd = self.encoder(x_input)
+        # remove all dimensions with size 1
+        ebd = ebd.squeeze()
+
+        h = self.l1(ebd)
+        h = F.relu(h)
+        h = self.l2(h)
+        h_output = self.docking(h)
+        y = self.all_classify(h)
+
+        return ebd, h_output, y
 
 
 class WORDEBD(nn.Module):

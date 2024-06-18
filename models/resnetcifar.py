@@ -203,18 +203,27 @@ class ResNetCifar10(nn.Module):
 
     def _forward_impl(self, x):
         # See note [TorchScript super()]
+        # x shape: N, 3, 32, 32
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
 
         x = self.layer1(x)
+        # x shape: N, 64, 32, 32
         x = self.layer2(x)
+        # x shape: N, 128, 16, 16
         x = self.layer3(x)
+        # x shape: N, 256, 8, 8
         x = self.layer4(x)
+        # x shape: N, 512, 4, 4
 
         x = self.avgpool(x)
+        # x shape: N, 512, 1, 1
         x = torch.flatten(x, 1)
+        # x shape: N, 512
         x = self.fc(x)
+        # x shape: N, number of classes
+        exit(0)
 
         return x
 

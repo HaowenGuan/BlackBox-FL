@@ -45,8 +45,8 @@ def _knowledge_distillation_generator_pseudocode(args, logger, prefix=''):
 def main_pseudocode(args, logger):
     logger.info('#' * 100)
     logger.info(f'{Color.BOLD}Configuration:{Color.END}')
-    logger.info(f'Using model {Color.BOLD}{args["net_config"]["model"]}{Color.END}')
-    if args['server_pretrained']:
+    logger.info(f'Using model {Color.BOLD}{args["net_config"]["encoder"]}{Color.END}')
+    if args['net_config']['pretrained']:
         logger.info(f'Using {Color.BOLD}pretrained model{Color.END} for server and clients')
     else:
         logger.info(f'{Color.BOLD}Random initialize{Color.END} model for server and clients')

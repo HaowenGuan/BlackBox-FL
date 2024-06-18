@@ -7,11 +7,10 @@ import torch.utils.data as data
 from torch.autograd import Variable
 import torch.nn.functional as F
 import torch.nn as nn
-import random
 from sklearn.metrics import confusion_matrix
 import pickle as pkl
 # from model import *
-from datasets import CIFAR10_truncated, CIFAR100_truncated, ImageFolder_custom
+from dataset.common_datasets import CIFAR10_truncated, CIFAR100_truncated, ImageFolder_custom
 from collections import defaultdict
 
 logging.basicConfig()

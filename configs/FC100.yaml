@@ -1,9 +1,9 @@
-log_wandb: True
-wandb_name: Pretrained + KD_Generator
+log_wandb: False
+wandb_name: testing
 device: cuda
-cuda_gpu: 0
-server_pretrained: True
-use_KD_Generator: True
+cuda_gpu: 2
+use_KD_Generator: False
+disable_meta: False
 seed: 0
 dataset: FC100
 log_dir: ./logs/
@@ -17,7 +17,6 @@ warmup_epoch: 0
 num_classes: 100
 dropout_p: 0.0
 fine_tune_lr: 0.1
-
 local_max_epoch: 100
 loss: contrastive
 lr: 0.001
@@ -25,8 +24,11 @@ meta_lr: 0.001
 mode: few-shot
 n_parties: 10
 net_config:
-  model: resnet18
-  out_dim: 256
+#  encoder: resnet18
+  encoder: vit_base_patch16_clip_224.openai
+  client_class: 20
+  total_class: 100
+  pretrained: True
 meta_config:
   num_train_tasks: 1
   fine_tune_steps: 5

@@ -166,19 +166,26 @@ class ResNet(nn.Module):
                              "or a 3-element tuple, got {}".format(replace_stride_with_dilation))
         self.groups = groups
         self.base_width = width_per_group
+        # input shape: N, 3, 224, 224
         self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3,
                                bias=False)
         self.bn1 = norm_layer(self.inplanes)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        # h shape: N, 64, 56, 56
         self.layer1 = self._make_layer(block, 64, layers[0])
+        # h shape: N, 64, 56, 56
         self.layer2 = self._make_layer(block, 128, layers[1], stride=2,
                                        dilate=replace_stride_with_dilation[0])
+        # h shape: N, 128, 28, 28
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2,
                                        dilate=replace_stride_with_dilation[1])
+        # h shape: N, 256, 14, 14
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2,
                                        dilate=replace_stride_with_dilation[2])
+        # h shape: N, 512, 7, 7
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        # h shape: N, 512, 1, 1
         self.fc = nn.Linear(512 * block.expansion, num_classes)
 
         for m in self.modules():

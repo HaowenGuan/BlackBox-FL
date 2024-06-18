@@ -1,8 +1,8 @@
-import json
 import torch.optim as optim
 import argparse
 import copy
 import datetime
+import random
 
 import wandb as wandb
 from sklearn.linear_model import LogisticRegression
@@ -17,6 +17,7 @@ import warnings
 from models.model_factory_fn import get_generator, init_nets
 from FedFTG import local_to_global_knowledge_distillation
 from pseudocode import main_pseudocode
+from dataset.transforms import *
 
 from collections import defaultdict, Counter
 
@@ -54,45 +55,6 @@ for fine_id, sparse_id in fine_to_coarse.items():
     # fine_split_train_map={class_:i for i,class_ in enumerate(fine_split['train'])}
 
 # train_class2id={class_id: i for i, class_id in enumerate(fine_split['train'])}
-
-
-import torchvision.transforms as transforms
-
-# FC100
-normalize_fc100 = transforms.Normalize(mean=[0.5070751592371323, 0.48654887331495095, 0.4409178433670343],
-                                       std=[0.2673342858792401, 0.2564384629170883, 0.27615047132568404])
-
-# miniImageNet
-mean_pix = [x / 255.0 for x in [120.39586422, 115.59361427, 104.54012653]]
-std_pix = [x / 255.0 for x in [70.68188272, 68.27635443, 72.54505529]]
-normalize_mini = transforms.Normalize(mean=mean_pix,
-                                      std=std_pix)
-
-
-# transform_train = transforms.Compose([
-#     transforms.RandomCrop(32),
-#     transforms.RandomHorizontalFlip(),
-#     transforms.ToTensor(),
-#     normalize
-# ])
-
-def transform_train(normalize, crop_size=None, padding=None):
-    return transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.RandomCrop(crop_size, padding=padding),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(15),
-        transforms.ToTensor(),
-        normalize
-    ])
-
-
-# data prep for test set
-def transform_test(normalize):
-    return transforms.Compose([
-        transforms.ToTensor(),
-        normalize])
-
 
 def l2_normalize(x):
     norm = (x.pow(2).sum(1, keepdim=True) + 1e-9).pow(1. / 2)
@@ -176,7 +138,6 @@ def init_args():
     parser.add_argument('--sample_fraction', type=float, default=1.0, help='how many clients are sampled in each round')
     parser.add_argument('--loss', type=str, default='contrastive')
     parser.add_argument('--server_momentum', type=float, default=0, help='the server momentum (FedAvgM)')
-    parser.add_argument('--server_pretrained', type=bool, default=False, help='whether the server is pretrained')
     args = parser.parse_args()
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
@@ -200,7 +161,7 @@ def init_args():
     return vars(args)
 
 
-def local_train_net(args, epoch, net, x_train_client, y_train_client, x_test, y_test, device='cpu'):
+def local_train_net(args, epoch, net, x_train_client, y_train_client, transform, device='cpu'):
     """
     Train a network on a given dataset with meta learning
     :param args: the arguments
@@ -208,17 +169,12 @@ def local_train_net(args, epoch, net, x_train_client, y_train_client, x_test, y_
     :param net: the network to train
     :param x_train_client: the training data for this client
     :param y_train_client: the training labels for this client
-    :param x_test: the test data
-    :param y_test: the test labels
+    :param transform: the transformation to apply to the data
     :param device: the device to use
     """
     # net = nn.DataParallel(net)
     # net=nn.parallel.DistributedDataParallel(net)
     # net.cuda()
-
-    # logger.info('Training network %s' % str(net_id))
-    # logger.info('n_training: %d' % X_train_client.shape[0])
-    # logger.info('n_test: %d' % x_test.shape[0])
 
     if args['optimizer'] == 'adam':
         optimizer = optim.Adam(net.parameters(), lr=args['lr'], weight_decay=args['reg'])
@@ -231,220 +187,182 @@ def local_train_net(args, epoch, net, x_train_client, y_train_client, x_test, y_
     loss_ce = nn.CrossEntropyLoss()
     loss_mse = nn.MSELoss()
 
-    def train_epoch():
-        N = args['meta_config']['train_client_class']
-        K = args['meta_config']['train_support_num']
-        Q = args['meta_config']['train_query_num']
-        net.train()
-        optimizer.zero_grad()
-        if args['dataset'] == 'FC100':
-            # X_transform = transform_train(normalize=normalize_fc100, crop_size=32, padding=4)
-            X_transform = transforms.Compose([
-                lambda x: Image.fromarray(x),
-                transforms.RandomCrop(32, padding=4),
-                transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4),
-                transforms.RandomHorizontalFlip(),
-                lambda x: np.asarray(x),
-                transforms.ToTensor(),
-                normalize_fc100
-            ])
-        else:
-            # X_transform = transform_train(normalize=normalize_mini, crop_size=84)
-            X_transform = transforms.Compose([
-                lambda x: Image.fromarray(x),
-                # transforms.ToPILImage(),
-                transforms.RandomCrop(84, padding=8),
-                transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4),
-                transforms.RandomHorizontalFlip(),
-                lambda x: np.asarray(x),
-                transforms.ToTensor(),
-                normalize_mini
-            ])
+    N = args['meta_config']['train_client_class']
+    K = args['meta_config']['train_support_num']
+    Q = args['meta_config']['train_query_num']
+    net.train()
+    optimizer.zero_grad()
 
 
-        if args['dataset'] == 'FC100':
-            class_dict = fine_split['train']
+    if args['dataset'] == 'FC100':
+        class_dict = fine_split['train']
+    elif args['dataset'] == 'miniImageNet':
+        class_dict = list(range(64))
+    elif args['dataset'] == '20newsgroup':
+        class_dict = [1, 5, 10, 11, 13, 14, 16, 18]
+    elif args['dataset'] == 'fewrel':
+        class_dict = [0, 1, 2, 3, 4, 5, 6, 8, 10, 11, 12, 13, 14, 15, 16, 19, 21,
+                      22, 24, 25, 26, 27, 28, 30, 31, 32, 33, 34, 35, 36, 37, 38,
+                      39, 40, 41, 43, 44, 45, 46, 48, 49, 50, 52, 53, 56, 57, 58,
+                      59, 61, 62, 63, 64, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75,
+                      76, 77, 78]
+    elif args['dataset'] == 'huffpost':
+        class_dict = list(range(20))
+    fine_split_train_map = {class_: i for i, class_ in enumerate(class_dict)}
+
+    X = x_train_client
+    y = y_train_client
+
+    # Pick N classes
+    # Make sure that each class has at least K + Q samples
+    temp_class_dict = class_dict.copy()
+    min_size = 0
+    while min_size < K + Q:
+        X_class = []
+        # Shrink the client number of classes if there are not enough samples
+        N = min(N, len(temp_class_dict))
+        classes = np.random.choice(temp_class_dict, N, replace=False).tolist()
+        for i in classes:
+            X_class.append(X[y == i])
+            if X_class[-1].shape[0] < K + Q:
+                temp_class_dict.remove(i)
+        min_size = min([one.shape[0] for one in X_class])
+
+    support_labels = torch.zeros(N * K, dtype=torch.long)
+    for i in range(N):
+        support_labels[i * K:(i + 1) * K] = i
+    query_labels = torch.zeros(N * Q, dtype=torch.long)
+    for i in range(N):
+        query_labels[i * Q:(i + 1) * Q] = i
+    support_labels = support_labels.to(device)
+    query_labels = query_labels.to(device)
+
+    x_sup = []
+    y_sup = []
+    # Following labels are never used actually
+    x_query = []
+    y_query = []
+    transformed_class_index_list = []
+    # sample K + Q samples for each class
+    for class_index, class_data in zip(classes, X_class):
+        sample_idx = np.random.choice(list(range(class_data.shape[0])), K + Q, replace=False).tolist()
+        x_sup.append(class_data[sample_idx[:K]])
+        x_query.append(class_data[sample_idx[K:]])
+
+        if args['dataset'] == 'FC100' or args['dataset'] == '20newsgroup' or args['dataset'] == 'fewrel' or args['dataset'] == 'huffpost':
+            transformed_class_index_list.append(fine_split_train_map[class_index])
+            y_sup.append(torch.ones(K) * fine_split_train_map[class_index])
+            y_query.append(torch.ones(Q) * fine_split_train_map[class_index])
         elif args['dataset'] == 'miniImageNet':
-            class_dict = list(range(64))
-        elif args['dataset'] == '20newsgroup':
-            class_dict = [1, 5, 10, 11, 13, 14, 16, 18]
-        elif args['dataset'] == 'fewrel':
-            class_dict = [0, 1, 2, 3, 4, 5, 6, 8, 10, 11, 12, 13, 14, 15, 16, 19, 21,
-                          22, 24, 25, 26, 27, 28, 30, 31, 32, 33, 34, 35, 36, 37, 38,
-                          39, 40, 41, 43, 44, 45, 46, 48, 49, 50, 52, 53, 56, 57, 58,
-                          59, 61, 62, 63, 64, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75,
-                          76, 77, 78]
-        elif args['dataset'] == 'huffpost':
-            class_dict = list(range(20))
-        fine_split_train_map = {class_: i for i, class_ in enumerate(class_dict)}
+            transformed_class_index_list.append(class_index)
+            y_sup.append(torch.ones(K) * class_index)
+            y_query.append(torch.ones(Q) * class_index)
 
-        X = x_train_client
-        y = y_train_client
+    x_sup = np.concatenate(x_sup, 0)
+    x_query = np.concatenate(x_query, 0)
+    y_total = torch.cat([torch.cat(y_sup, 0), torch.cat(y_query, 0)], 0).long().to(args['device'])
 
-        # Pick N classes
-        # Make sure that each class has at least K + Q samples
-        temp_class_dict = class_dict.copy()
-        min_size = 0
-        while min_size < K + Q:
-            X_class = []
-            # Shrink the client number of classes if there are not enough samples
-            N = min(N, len(temp_class_dict))
-            classes = np.random.choice(temp_class_dict, N, replace=False).tolist()
-            for i in classes:
-                X_class.append(X[y == i])
-                if X_class[-1].shape[0] < K + Q:
-                    temp_class_dict.remove(i)
-            min_size = min([one.shape[0] for one in X_class])
+    # Apply the same transformation to the support set and the query set if its image dataset
+    if args['dataset'] == 'FC100' or args['dataset'] == 'miniImageNet':
+        X_total_transformed_sup = []
+        X_total_transformed_query = []
+        for i in range(x_sup.shape[0]):
+            X_total_transformed_sup.append(transform(x_sup[i]))
+        x_sup = torch.stack(X_total_transformed_sup, 0)
 
-        support_labels = torch.zeros(N * K, dtype=torch.long)
-        for i in range(N):
-            support_labels[i * K:(i + 1) * K] = i
-        query_labels = torch.zeros(N * Q, dtype=torch.long)
-        for i in range(N):
-            query_labels[i * Q:(i + 1) * Q] = i
-        support_labels = support_labels.to(device)
-        query_labels = query_labels.to(device)
+        for i in range(x_query.shape[0]):
+            X_total_transformed_query.append(transform(x_query[i]))
+        x_query = torch.stack(X_total_transformed_query, 0)
 
-        x_sup = []
-        y_sup = []
-        # Following labels are never used actually
-        x_query = []
-        y_query = []
-        transformed_class_index_list = []
-        # sample K + Q samples for each class
-        for class_index, class_data in zip(classes, X_class):
-            sample_idx = np.random.choice(list(range(class_data.shape[0])), K + Q, replace=False).tolist()
-            x_sup.append(class_data[sample_idx[:K]])
-            x_query.append(class_data[sample_idx[K:]])
+    # Finalized meta-learning data
+    x_sup = torch.tensor(x_sup).to(args['device'])
+    x_query = torch.tensor(x_query).to(args['device'])
 
-            if args['dataset'] == 'FC100' or args['dataset'] == '20newsgroup' or args['dataset'] == 'fewrel' or args['dataset'] == 'huffpost':
-                transformed_class_index_list.append(fine_split_train_map[class_index])
-                y_sup.append(torch.ones(K) * fine_split_train_map[class_index])
-                y_query.append(torch.ones(Q) * fine_split_train_map[class_index])
-            elif args['dataset'] == 'miniImageNet':
-                transformed_class_index_list.append(class_index)
-                y_sup.append(torch.ones(K) * class_index)
-                y_query.append(torch.ones(Q) * class_index)
+    # Start training
+    ft_net = copy.deepcopy(net)
+    ############################
+    # Fast Adaptation
+    for j in range(args['meta_config']['fine_tune_steps']):
+        ft_sup_embedding, ft_sup_transformer_feature, ft_sup_y_hat = ft_net(x_sup)
+        loss = loss_ce(ft_sup_y_hat, support_labels)
 
-        x_sup = np.concatenate(x_sup, 0)
-        x_query = np.concatenate(x_query, 0)
-        y_total = torch.cat([torch.cat(y_sup, 0), torch.cat(y_query, 0)], 0).long().to(args['device'])
-
-        # Apply the same transformation to the support set and the query set if its image dataset
-        if args['dataset'] == 'FC100' or args['dataset'] == 'miniImageNet':
-            X_total_transformed_sup = []
-            X_total_transformed_query = []
-            for i in range(x_sup.shape[0]):
-                X_total_transformed_sup.append(X_transform(x_sup[i]))
-            x_sup = torch.stack(X_total_transformed_sup, 0)
-
-            for i in range(x_query.shape[0]):
-                X_total_transformed_query.append(X_transform(x_query[i]))
-            x_query = torch.stack(X_total_transformed_query, 0)
-
-        # Finalized meta-learning data
-        x_sup = torch.tensor(x_sup).to(args['device'])
-        x_query = torch.tensor(x_query).to(args['device'])
-
-        # Start training
-        ft_net = copy.deepcopy(net)
-        ############################
-        # Fast Adaptation
-        for j in range(args['meta_config']['fine_tune_steps']):
-            ft_sup_embedding, ft_sup_transformer_feature, ft_sup_y_hat = ft_net(x_sup)
-            loss = loss_ce(ft_sup_y_hat, support_labels)
-
-            ft_net_weight = ft_net.state_dict()
-            param_require_grad = {}
-            for key, param in ft_net.named_parameters():
-                # if key == 'few_classify.weight' or key == 'few_classify.bias':
-                if key.startswith('transformer') or key.startswith('few_classify'):
-                    if param.requires_grad:
-                        param_require_grad[key] = param
-            grads = torch.autograd.grad(loss, param_require_grad.values(), allow_unused=True)
-            for key, grad in zip(param_require_grad.keys(), grads):
-                if grad is None: continue
-                ft_net_weight[key] -= args['fine_tune_lr'] * grad
-            ft_net.load_state_dict(ft_net_weight)
-
-        ############################
-        # Meta-Update
-        _, _, meta_query_y_hat = ft_net(x_query)
-        meta_query_y_hat = meta_query_y_hat[:, :N]
-        _, _, y_hat = net(torch.cat([x_sup, x_query], 0), all_classify=True)
-        # Only update the few-classifier (client model)
-        net_para_ori = net.state_dict()
+        ft_net_weight = ft_net.state_dict()
         param_require_grad = {}
         for key, param in ft_net.named_parameters():
+            # if key == 'few_classify.weight' or key == 'few_classify.bias':
             if key.startswith('transformer') or key.startswith('few_classify'):
-                param_require_grad[key] = param
-
-        loss = loss_ce(meta_query_y_hat, query_labels)
-        if args['log_wandb']:
-            wandb.log({'Client Query Loss': loss.item()}, step=epoch)
-        # Global to Local Distillation Through Logits Matching
-        out_sup_on_N_class = y_hat[N * K:, transformed_class_index_list]
-        out_sup_on_N_class /= out_sup_on_N_class.sum(-1, keepdim=True)
-        mse = loss_mse(meta_query_y_hat, out_sup_on_N_class) * 0.1
-        loss += mse
-        if args['log_wandb']:
-            wandb.log({'Global to Local Partial KD Loss': mse.item()}, step=epoch)
-        grads = torch.autograd.grad(loss, param_require_grad.values())
+                if param.requires_grad:
+                    param_require_grad[key] = param
+        grads = torch.autograd.grad(loss, param_require_grad.values(), allow_unused=True)
         for key, grad in zip(param_require_grad.keys(), grads):
-            net_para_ori[key] = net_para_ori[key] - args['meta_lr'] * grad
-        net.load_state_dict(net_para_ori)
+            if grad is None: continue
+            ft_net_weight[key] -= args['fine_tune_lr'] * grad
+        ft_net.load_state_dict(ft_net_weight)
 
-        ############################
-        # Local to Global Knowledge Distillation Through Feature Matching
-        latent_embedding, _, y_hat = net(torch.cat([x_sup, x_query], 0), all_classify=True)
-        latent_embedding = latent_embedding.reshape([N, K + Q, -1]).transpose(0, 1)
-        ft_net = copy.deepcopy(net)
-        _, meta_transformer_feature, _ = ft_net(torch.cat([x_sup, x_query], 0))
-        meta_transformer_feature = meta_transformer_feature.reshape([N, K + Q, -1]).transpose(0, 1)
+    ############################
+    # Meta-Update
+    _, _, meta_query_y_hat = ft_net(x_query)
+    meta_query_y_hat = meta_query_y_hat[:, :N]
+    _, _, y_hat = net(torch.cat([x_sup, x_query], 0), all_classify=True)
+    # Only update the few-classifier (client model)
+    net_para_ori = net.state_dict()
+    param_require_grad = {}
+    for key, param in ft_net.named_parameters():
+        if key.startswith('transformer') or key.startswith('few_classify'):
+            param_require_grad[key] = param
 
-        # Maximize the similarity of local and global H
-        # Update the parameter of global model (Main Feature + Full Classifier)
-        loss = 0
-        for j in range(K + Q):
-            contras_loss, similarity = InforNCE_Loss(meta_transformer_feature[j], latent_embedding[j])
-            loss += contras_loss / K * 0.1
-        if args['log_wandb']:
-            wandb.log({'Local to Global Contrastive Loss': loss.item()}, step=epoch)
-        main_loss = loss_ce(y_hat, y_total)
-        if args['log_wandb']:
-            wandb.log({'Server Main Loss': main_loss.item()}, step=epoch)
-        loss = main_loss + loss
-        loss.backward()
-        optimizer.step()
+    loss = loss_ce(meta_query_y_hat, query_labels)
+    if args['log_wandb']:
+        wandb.log({'Client Query Loss': loss.item()}, step=epoch)
+    # Global to Local Distillation Through Logits Matching
+    out_sup_on_N_class = y_hat[N * K:, transformed_class_index_list]
+    out_sup_on_N_class /= out_sup_on_N_class.sum(-1, keepdim=True)
+    mse = loss_mse(meta_query_y_hat, out_sup_on_N_class) * 0.1
+    loss += mse
+    if args['log_wandb']:
+        wandb.log({'Global to Local Partial KD Loss': mse.item()}, step=epoch)
+    grads = torch.autograd.grad(loss, param_require_grad.values())
+    for key, grad in zip(param_require_grad.keys(), grads):
+        net_para_ori[key] = net_para_ori[key] - args['meta_lr'] * grad
+    net.load_state_dict(net_para_ori)
 
-        acc_train = (torch.argmax(y_hat, -1) == y_total).float().mean().item()
+    ############################
+    # Local to Global Knowledge Distillation Through Feature Matching
+    latent_embedding, _, y_hat = net(torch.cat([x_sup, x_query], 0), all_classify=True)
+    latent_embedding = latent_embedding.reshape([N, K + Q, -1]).transpose(0, 1)
+    ft_net = copy.deepcopy(net)
+    _, meta_transformer_feature, _ = ft_net(torch.cat([x_sup, x_query], 0))
+    meta_transformer_feature = meta_transformer_feature.reshape([N, K + Q, -1]).transpose(0, 1)
 
-        del latent_embedding, y_hat
-        return acc_train
+    # Maximize the similarity of local and global H
+    # Update the parameter of global model (Main Feature + Full Classifier)
+    loss = 0
+    for j in range(K + Q):
+        contras_loss, similarity = InforNCE_Loss(meta_transformer_feature[j], latent_embedding[j])
+        loss += contras_loss / K * 0.1
+    if args['log_wandb']:
+        wandb.log({'Local to Global Contrastive Loss': loss.item()}, step=epoch)
+    main_loss = loss_ce(y_hat, y_total)
+    if args['log_wandb']:
+        wandb.log({'Server Main Loss': main_loss.item()}, step=epoch)
+    loss = main_loss + loss
+    loss.backward()
+    optimizer.step()
 
-    # Training
-    accs = []
-    for _ in range(args['meta_config']['num_train_tasks']):
-        accs.append(train_epoch())
+    acc_train = (torch.argmax(y_hat, -1) == y_total).float().mean().item()
 
-    # Testing
-    accs_test = []
-    for _ in range(args['num_test_tasks']):
-        acc_test, _, _ = local_test_net(args, net, x_test, y_test, device)
-        accs_test.append(acc_test)
-
-    # logger.info(f"Client {net_id}, train accuracy {np.mean(accs):.4f}, test accuracy: {np.mean(accs_test):.4f}")
-
-    return np.mean(accs_test)
+    del latent_embedding, y_hat
+    return acc_train
 
 
-def local_test_net(args, net, x_test, y_test, device='cpu', test_k=None):
+def local_test_net(args, net, x_test, y_test, transform, device='cpu', test_k=None):
     """
         test a net on a given dataset with meta learning
         :param args: the arguments
         :param net: the network to test
         :param x_test: the test data
         :param y_test: the test labels
+        :param transform: the transform to apply to the data
         :param test_k: specific k for the test, if None, use the default test_k
         :param device: the device to use
         """
@@ -460,10 +378,6 @@ def local_test_net(args, net, x_test, y_test, device='cpu', test_k=None):
     K = test_k if test_k else args['meta_config']['test_support_num']
     Q = args['meta_config']['test_query_num']
     net.eval()
-    if args['dataset'] == 'FC100':
-        X_transform = transform_test(normalize=normalize_fc100)
-    else:
-        X_transform = transform_test(normalize=normalize_mini)
 
     support_labels = torch.zeros(N * K, dtype=torch.long)
     for i in range(N):
@@ -520,11 +434,11 @@ def local_test_net(args, net, x_test, y_test, device='cpu', test_k=None):
         X_total_transformed_sup = []
         X_total_transformed_query = []
         for i in range(x_sup.shape[0]):
-            X_total_transformed_sup.append(X_transform(x_sup[i]))
+            X_total_transformed_sup.append(transform(x_sup[i]))
         x_sup = torch.stack(X_total_transformed_sup, 0)
 
         for i in range(x_query.shape[0]):
-            X_total_transformed_query.append(X_transform(x_query[i]))
+            X_total_transformed_query.append(transform(x_query[i]))
         x_query = torch.stack(X_total_transformed_query, 0)
 
     # Finalized meta-learning data
@@ -558,7 +472,7 @@ def local_test_net(args, net, x_test, y_test, device='cpu', test_k=None):
     return acc_train, max_value, index
 
 
-def local_train_nets(nets, args, epoch, net_dataidx_map, x_train, y_train, x_test, y_test, device="cpu"):
+def clients_meta_train(nets, args, epoch, net_dataidx_map, x_train, y_train, x_test, y_test, train_transform, test_transform, device="cpu"):
     acc_list = []
 
     for net_id, net in nets.items():
@@ -570,9 +484,18 @@ def local_train_nets(nets, args, epoch, net_dataidx_map, x_train, y_train, x_tes
         X_train_client = x_train[data_idxs]
         y_train_client = y_train[data_idxs]
 
-        test_acc = local_train_net(args, epoch, net, X_train_client, y_train_client, x_test, y_test, device=device)
+        # Training
+        accs = []
+        for _ in range(args['meta_config']['num_train_tasks']):
+            accs.append(local_train_net(args, epoch, net, X_train_client, y_train_client, train_transform, device=device))
 
-        acc_list.append(test_acc)
+        # Local Testing
+        accs_test = []
+        for _ in range(args['num_test_tasks']):
+            acc_test, _, _ = local_test_net(args, net, x_test, y_test, test_transform, device)
+            accs_test.append(acc_test)
+
+        acc_list.append(np.mean(accs_test))
 
     logger.info(' | '.join(['{:.4f}'.format(acc) for acc in acc_list]))
     if args['log_wandb']:
@@ -654,6 +577,25 @@ def run_experiment(args):
     global_models, global_model_meta_data, global_layer_type = init_nets(1, args)
     global_model = global_models[0]
 
+    train_transform = test_transform = None
+    if args['net_config']['encoder'] == 'resnet18':
+        if args['dataset'] == 'FC100':
+            transform = get_fc100_transform()
+            train_transform = transform['train_transform']
+            test_transform = transform['test_transform']
+        elif args['dataset'] == 'miniImageNet':
+            transform = get_mini_image_transform()
+            train_transform = transform['train_transform']
+            test_transform = transform['test_transform']
+    elif 'clip' in args['net_config']['encoder']:
+        transform = get_timm_transform(global_model.encoder)
+        train_transform = transform['train_transform']
+        test_transform = transform['test_transform']
+    else:
+        raise ValueError('Unknown encoder')
+
+
+
     # set up the generator
     init_g_model = get_generator(**args['generator_config'])
 
@@ -695,7 +637,7 @@ def run_experiment(args):
                 for k in args['meta_config']['test_k']:
                     accs = []
                     for epoch_test in range(args['num_test_tasks'] * args['num_true_test_ratio']):
-                        acc, max_value, index = local_test_net(args, nets_this_round[0], x_test, y_test, device, k)
+                        acc, max_value, index = local_test_net(args, nets_this_round[0], x_test, y_test, test_transform, device, k)
                         accs.append(acc)
 
                     global_acc = np.mean(accs)
@@ -707,7 +649,18 @@ def run_experiment(args):
                         wandb.log({f'Global K={k} Test Accuracy': global_acc}, step=epoch)
 
             # Meta-training on each client's end
-            local_train_nets(nets_this_round, args, epoch, net_data_idx_map, x_train, y_train, x_test, y_test, device=device)
+            clients_meta_train(
+                nets_this_round,
+                args,
+                epoch,
+                net_data_idx_map,
+                x_train,
+                y_train,
+                x_test,
+                y_test,
+                train_transform,
+                test_transform,
+                device=device)
 
             if epoch >= args['warmup_epoch']:
                 # Local to Global: Aggregate the clients' models

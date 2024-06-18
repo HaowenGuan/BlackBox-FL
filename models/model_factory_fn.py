@@ -3,11 +3,12 @@ from models import resnet
 # from models import vgg
 from models import generators
 from models.model import *
+import copy
 
 
 def get_model(model_name, **kwargs):
     if model_name == 'resnet18':
-        return resnet.resnet18(**kwargs)
+        return resnet.resnext18(**kwargs)
     else:
         raise ValueError('Wrong model name.')
 
@@ -30,11 +31,13 @@ def init_nets(num_clients, args):
     server_classes = args['num_classes']
 
     if args['mode'] == 'few-shot':
+        if args['dataset'] == 'FC100' or args['dataset'] == 'miniImageNet':
+            model = ImageModel(**net_config)
+        else:
+            model = LSTMAtt(WORDEBD(args['finetune_ebd']), net_config['out_dim'], client_classes, server_classes, args)
+
         for net_i in range(num_clients):
-            if args['dataset'] == 'FC100' or args['dataset'] == 'miniImageNet':
-                net = ImageModel(net_config['model'], net_config['out_dim'], client_classes, server_classes, args)
-            else:
-                net = LSTMAtt(WORDEBD(args['finetune_ebd']), net_config['out_dim'], client_classes, server_classes, args)
+            net = copy.deepcopy(model)
             net.to(args['device'])
             nets[net_i] = net
 
