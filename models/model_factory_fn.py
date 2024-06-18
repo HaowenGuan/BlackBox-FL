@@ -21,7 +21,7 @@ def get_generator(model_name, **kwargs):
         raise ValueError('Wrong model name.')
 
 
-def init_nets(num_clients, args):
+def init_client_nets(num_clients, args):
     """
     Initialize the networks for each client
     """
@@ -32,7 +32,7 @@ def init_nets(num_clients, args):
 
     if args['mode'] == 'few-shot':
         if args['dataset'] == 'FC100' or args['dataset'] == 'miniImageNet':
-            model = ImageModel(**net_config)
+            model = ClientModel(net_config['encoder'], net_config['total_class'], 768)
         else:
             model = LSTMAtt(WORDEBD(args['finetune_ebd']), net_config['out_dim'], client_classes, server_classes, args)
 
@@ -48,3 +48,26 @@ def init_nets(num_clients, args):
         layer_type.append(k)
 
     return nets, model_meta_data, layer_type
+
+
+def init_server_net(args):
+    """
+    Initialize the networks for each client
+    """
+    net_config = args['net_config']
+    client_classes = args['meta_config']['train_client_class']
+    server_classes = args['num_classes']
+
+    if args['dataset'] == 'FC100' or args['dataset'] == 'miniImageNet':
+        model = ServerModel(**net_config)
+    else:
+        model = LSTMAtt(WORDEBD(args['finetune_ebd']), net_config['out_dim'], client_classes, server_classes, args)
+    model.to(args['device'])
+
+    model_meta_data = []
+    layer_type = []
+    for (k, v) in model.state_dict().items():
+        model_meta_data.append(v.shape)
+        layer_type.append(k)
+
+    return model, model_meta_data, layer_type

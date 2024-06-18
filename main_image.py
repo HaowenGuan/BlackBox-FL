@@ -9,13 +9,19 @@ from sklearn.linear_model import LogisticRegression
 import yaml
 import sys
 
+from torchvision import transforms
+from torchvision.transforms.functional import InterpolationMode
+
+resize = transforms.Resize(size=224, interpolation=InterpolationMode.BICUBIC, max_size=None, antialias=True)
+
+
 from PIL import Image
 
 from models.model import *
 from utils import *
 import warnings
-from models.model_factory_fn import get_generator, init_nets
-from FedFTG import local_to_global_knowledge_distillation
+from models.model_factory_fn import get_generator, init_client_nets, init_server_net
+from FedFTG import local_to_global_knowledge_distillation, warmup_generator
 from pseudocode import main_pseudocode
 from dataset.transforms import *
 
@@ -161,7 +167,7 @@ def init_args():
     return vars(args)
 
 
-def local_train_net(args, epoch, net, x_train_client, y_train_client, transform, device='cpu'):
+def local_train_net(args, epoch, net,  optimizer, x_train_client, y_train_client, transform, global_model, fake_data, fake_data_labels, server_embedding,  device='cpu'):
     """
     Train a network on a given dataset with meta learning
     :param args: the arguments
@@ -175,7 +181,9 @@ def local_train_net(args, epoch, net, x_train_client, y_train_client, transform,
     # net = nn.DataParallel(net)
     # net=nn.parallel.DistributedDataParallel(net)
     # net.cuda()
-
+    net.train()
+    for params in net.parameters():
+        params.requires_grad = True
     if args['optimizer'] == 'adam':
         optimizer = optim.Adam(net.parameters(), lr=args['lr'], weight_decay=args['reg'])
     elif args['optimizer'] == 'amsgrad':
@@ -190,7 +198,7 @@ def local_train_net(args, epoch, net, x_train_client, y_train_client, transform,
     N = args['meta_config']['train_client_class']
     K = args['meta_config']['train_support_num']
     Q = args['meta_config']['train_query_num']
-    net.train()
+
     optimizer.zero_grad()
 
 
@@ -228,14 +236,14 @@ def local_train_net(args, epoch, net, x_train_client, y_train_client, transform,
                 temp_class_dict.remove(i)
         min_size = min([one.shape[0] for one in X_class])
 
-    support_labels = torch.zeros(N * K, dtype=torch.long)
-    for i in range(N):
-        support_labels[i * K:(i + 1) * K] = i
-    query_labels = torch.zeros(N * Q, dtype=torch.long)
-    for i in range(N):
-        query_labels[i * Q:(i + 1) * Q] = i
-    support_labels = support_labels.to(device)
-    query_labels = query_labels.to(device)
+    # support_labels = torch.zeros(N * K, dtype=torch.long)
+    # for i in range(N):
+    #     support_labels[i * K:(i + 1) * K] = i
+    # query_labels = torch.zeros(N * Q, dtype=torch.long)
+    # for i in range(N):
+    #     query_labels[i * Q:(i + 1) * Q] = i
+    # support_labels = support_labels.to(device)
+    # query_labels = query_labels.to(device)
 
     x_sup = []
     y_sup = []
@@ -250,9 +258,9 @@ def local_train_net(args, epoch, net, x_train_client, y_train_client, transform,
         x_query.append(class_data[sample_idx[K:]])
 
         if args['dataset'] == 'FC100' or args['dataset'] == '20newsgroup' or args['dataset'] == 'fewrel' or args['dataset'] == 'huffpost':
-            transformed_class_index_list.append(fine_split_train_map[class_index])
-            y_sup.append(torch.ones(K) * fine_split_train_map[class_index])
-            y_query.append(torch.ones(Q) * fine_split_train_map[class_index])
+            transformed_class_index_list.append(class_index)
+            y_sup.append(torch.ones(K) * class_index)
+            y_query.append(torch.ones(Q) * class_index)
         elif args['dataset'] == 'miniImageNet':
             transformed_class_index_list.append(class_index)
             y_sup.append(torch.ones(K) * class_index)
@@ -260,7 +268,9 @@ def local_train_net(args, epoch, net, x_train_client, y_train_client, transform,
 
     x_sup = np.concatenate(x_sup, 0)
     x_query = np.concatenate(x_query, 0)
-    y_total = torch.cat([torch.cat(y_sup, 0), torch.cat(y_query, 0)], 0).long().to(args['device'])
+    support_labels = torch.tensor(np.concatenate(y_sup, 0)).long().to(args['device'])
+    query_labels = torch.tensor(np.concatenate(y_query, 0)).long().to(args['device'])
+    y_total = torch.cat([support_labels, query_labels], 0).long().to(args['device'])
 
     # Apply the same transformation to the support set and the query set if its image dataset
     if args['dataset'] == 'FC100' or args['dataset'] == 'miniImageNet':
@@ -279,79 +289,67 @@ def local_train_net(args, epoch, net, x_train_client, y_train_client, transform,
     x_query = torch.tensor(x_query).to(args['device'])
 
     # Start training
-    ft_net = copy.deepcopy(net)
     ############################
     # Fast Adaptation
+    ft_net = copy.deepcopy(net)
+    ft_optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=0.05, momentum=0.9, weight_decay=args['reg'])
     for j in range(args['meta_config']['fine_tune_steps']):
+        ft_optimizer.zero_grad()
         ft_sup_embedding, ft_sup_transformer_feature, ft_sup_y_hat = ft_net(x_sup)
         loss = loss_ce(ft_sup_y_hat, support_labels)
-
-        ft_net_weight = ft_net.state_dict()
-        param_require_grad = {}
-        for key, param in ft_net.named_parameters():
-            # if key == 'few_classify.weight' or key == 'few_classify.bias':
-            if key.startswith('transformer') or key.startswith('few_classify'):
-                if param.requires_grad:
-                    param_require_grad[key] = param
-        grads = torch.autograd.grad(loss, param_require_grad.values(), allow_unused=True)
-        for key, grad in zip(param_require_grad.keys(), grads):
-            if grad is None: continue
-            ft_net_weight[key] -= args['fine_tune_lr'] * grad
-        ft_net.load_state_dict(ft_net_weight)
-
+        loss.backward()
+        ft_optimizer.step()
     ############################
     # Meta-Update
+    ft_optimizer.zero_grad()
     _, _, meta_query_y_hat = ft_net(x_query)
-    meta_query_y_hat = meta_query_y_hat[:, :N]
-    _, _, y_hat = net(torch.cat([x_sup, x_query], 0), all_classify=True)
-    # Only update the few-classifier (client model)
-    net_para_ori = net.state_dict()
-    param_require_grad = {}
-    for key, param in ft_net.named_parameters():
-        if key.startswith('transformer') or key.startswith('few_classify'):
-            param_require_grad[key] = param
-
     loss = loss_ce(meta_query_y_hat, query_labels)
+    loss.backward()
+
     if args['log_wandb']:
         wandb.log({'Client Query Loss': loss.item()}, step=epoch)
+
+    for param1, param2 in zip(ft_net.parameters(), net.parameters()):
+        if param2.grad is not None:
+            param2.grad.zero_()  # zero out gradients in model2 to avoid accumulating with existing ones
+        if param1.grad is not None:
+            param2.grad = param1.grad.clone()
+
+    optimizer.step()
+    optimizer.zero_grad()
+
     # Global to Local Distillation Through Logits Matching
-    out_sup_on_N_class = y_hat[N * K:, transformed_class_index_list]
-    out_sup_on_N_class /= out_sup_on_N_class.sum(-1, keepdim=True)
-    mse = loss_mse(meta_query_y_hat, out_sup_on_N_class) * 0.1
-    loss += mse
-    if args['log_wandb']:
-        wandb.log({'Global to Local Partial KD Loss': mse.item()}, step=epoch)
-    grads = torch.autograd.grad(loss, param_require_grad.values())
-    for key, grad in zip(param_require_grad.keys(), grads):
-        net_para_ori[key] = net_para_ori[key] - args['meta_lr'] * grad
-    net.load_state_dict(net_para_ori)
+    # out_sup_on_N_class = y_hat[N * K:, transformed_class_index_list]
+    # out_sup_on_N_class /= out_sup_on_N_class.sum(-1, keepdim=True)
+    # mse = loss_mse(meta_query_y_hat, out_sup_on_N_class) * 0.1
+    # loss += mse
+    # if args['log_wandb']:
+    #     wandb.log({'Global to Local Partial KD Loss': mse.item()}, step=epoch)
 
     ############################
     # Local to Global Knowledge Distillation Through Feature Matching
-    latent_embedding, _, y_hat = net(torch.cat([x_sup, x_query], 0), all_classify=True)
-    latent_embedding = latent_embedding.reshape([N, K + Q, -1]).transpose(0, 1)
-    ft_net = copy.deepcopy(net)
-    _, meta_transformer_feature, _ = ft_net(torch.cat([x_sup, x_query], 0))
-    meta_transformer_feature = meta_transformer_feature.reshape([N, K + Q, -1]).transpose(0, 1)
 
-    # Maximize the similarity of local and global H
-    # Update the parameter of global model (Main Feature + Full Classifier)
+    _, client_embedding, y_hat = net(torch.cat([x_sup, x_query], 0))
+    client_embedding = client_embedding.reshape([N, K + Q, -1]).transpose(0, 1)
+    #
+    # # Maximize the similarity of local and global H
+    # # Update the parameter of global model (Main Feature + Full Classifier)
     loss = 0
+    global_model.eval()
+    with torch.no_grad():
+        server_embedding, _, y_hat = global_model(resize(torch.cat([x_sup, x_query], 0)))
+    server_embedding = server_embedding.reshape([N, K + Q, -1]).transpose(0, 1)
     for j in range(K + Q):
-        contras_loss, similarity = InforNCE_Loss(meta_transformer_feature[j], latent_embedding[j])
-        loss += contras_loss / K * 0.1
+        contras_loss, similarity = InforNCE_Loss(server_embedding[j], client_embedding[j])
+        loss += contras_loss / K
     if args['log_wandb']:
-        wandb.log({'Local to Global Contrastive Loss': loss.item()}, step=epoch)
-    main_loss = loss_ce(y_hat, y_total)
-    if args['log_wandb']:
-        wandb.log({'Server Main Loss': main_loss.item()}, step=epoch)
-    loss = main_loss + loss
+        wandb.log({'Global to Local Contrastive Loss': loss.item()}, step=epoch)
     loss.backward()
     optimizer.step()
 
     acc_train = (torch.argmax(y_hat, -1) == y_total).float().mean().item()
-
-    del latent_embedding, y_hat
+    #
+    # del latent_embedding, y_hat
     return acc_train
 
 
@@ -472,7 +470,7 @@ def local_test_net(args, net, x_test, y_test, transform, device='cpu', test_k=No
     return acc_train, max_value, index
 
 
-def clients_meta_train(nets, args, epoch, net_dataidx_map, x_train, y_train, x_test, y_test, train_transform, test_transform, device="cpu"):
+def clients_meta_train(nets, opts, args, epoch, net_dataidx_map, x_train, y_train, x_test, y_test, train_transform, test_transform, global_model, fake_data, fake_data_labels, server_embedding, device="cpu"):
     acc_list = []
 
     for net_id, net in nets.items():
@@ -487,7 +485,7 @@ def clients_meta_train(nets, args, epoch, net_dataidx_map, x_train, y_train, x_t
         # Training
         accs = []
         for _ in range(args['meta_config']['num_train_tasks']):
-            accs.append(local_train_net(args, epoch, net, X_train_client, y_train_client, train_transform, device=device))
+            accs.append(local_train_net(args, epoch, net, opts[net_id], X_train_client, y_train_client, train_transform, global_model, fake_data, fake_data_labels, server_embedding, device=device))
 
         # Local Testing
         accs_test = []
@@ -572,25 +570,41 @@ def run_experiment(args):
 
     n_classes = len(np.unique(y_train))
 
-    logger.info("Initializing nets")
-    nets, local_model_meta_data, layer_type = init_nets(args['n_parties'], args)
-    global_models, global_model_meta_data, global_layer_type = init_nets(1, args)
-    global_model = global_models[0]
+    logger.info("Initializing clients")
+    clients, local_model_meta_data, layer_type = init_client_nets(args['n_parties'], args)
+    global_model, global_model_meta_data, global_layer_type = init_server_net(args)
 
-    train_transform = test_transform = None
+    optimizers = {}
+    for client_id, client in clients.items():
+        for param in client.parameters():
+            param.requires_grad = True
+        if args['optimizer'] == 'adam':
+            optimizer = optim.Adam(client.parameters(), lr=args['lr'], weight_decay=args['reg'])
+        elif args['optimizer'] == 'amsgrad':
+            optimizer = optim.Adam(filter(lambda p: p.requires_grad, client.parameters()), lr=args['lr'], weight_decay=args['reg'],
+                                   amsgrad=True)
+        elif args['optimizer'] == 'sgd':
+            optimizer = optim.SGD(filter(lambda p: p.requires_grad, client.parameters()), lr=0.05, momentum=0.9,
+                                  weight_decay=args['reg'])
+        optimizers[client_id] = optimizer
+
+    server_train_transform = server_test_transform = client_train_transform = client_test_transform = None
     if args['net_config']['encoder'] == 'resnet18':
         if args['dataset'] == 'FC100':
             transform = get_fc100_transform()
-            train_transform = transform['train_transform']
-            test_transform = transform['test_transform']
+            server_train_transform = client_train_transform = transform['train_transform']
+            server_test_transform = client_test_transform = transform['test_transform']
         elif args['dataset'] == 'miniImageNet':
             transform = get_mini_image_transform()
-            train_transform = transform['train_transform']
-            test_transform = transform['test_transform']
+            server_train_transform = client_train_transform = transform['train_transform']
+            server_test_transform = client_test_transform = transform['test_transform']
     elif 'clip' in args['net_config']['encoder']:
-        transform = get_timm_transform(global_model.encoder)
-        train_transform = transform['train_transform']
-        test_transform = transform['test_transform']
+        transform = get_vit_224_size_transform(global_model.encoder)
+        server_train_transform = transform['train_transform']
+        server_test_transform = transform['test_transform']
+        transform = get_vit_original_size_transform()
+        client_train_transform = transform['train_transform']
+        client_test_transform = transform['test_transform']
     else:
         raise ValueError('Unknown encoder')
 
@@ -599,104 +613,91 @@ def run_experiment(args):
     # set up the generator
     init_g_model = get_generator(**args['generator_config'])
 
-    if args['server_momentum']:
-        moment_v = copy.deepcopy(global_model.state_dict())
-        for key in moment_v:
-            moment_v[key] = 0
-    if args['alg'] == 'fedavg':
-        mkdirs(args['checkpoint_dir'] + 'fedavg/')
-        best_acc_dict = Counter()
-        best_confident_acc = 0
+    mkdirs(args['checkpoint_dir'] + 'blackbox/')
+    best_acc_dict = Counter()
+    best_confident_acc = 0
 
-        for epoch in range(args['total_epoch']):
-            logger.info(f'>> Current Round: {epoch}')
-            party_list_this_round = party_list_rounds[epoch]
+    for epoch in range(args['total_epoch']):
+        logger.info(f'>> Current Round: {epoch}')
+        party_list_this_round = party_list_rounds[epoch]
 
-            global_w = global_model.state_dict()
-            if args['server_momentum']:
-                old_w = copy.deepcopy(global_model.state_dict())
+        global_w = global_model.state_dict()
 
-            nets_this_round = {k: nets[k] for k in party_list_this_round}
+        clients_this_round = {k: clients[k] for k in party_list_this_round}
 
-            # The total number of data points in the current round of selected clients
-            total_data_points = sum([len(net_data_idx_map[r]) for r in range(args['n_parties'])])
-            # Calculate the percentage of data points for each client
-            fed_avg_weight = [len(net_data_idx_map[r]) / total_data_points for r in range(args['n_parties'])]
+        # The total number of data points in the current round of selected clients
+        total_data_points = sum([len(net_data_idx_map[r]) for r in range(args['n_parties'])])
+        # Calculate the percentage of data points for each client
+        fed_avg_weight = [len(net_data_idx_map[r]) / total_data_points for r in range(args['n_parties'])]
 
-            if epoch >= args['warmup_epoch']:
-                # Global to Local: Distribute global model to all clients
-                for net_id, net in nets_this_round.items():
-                    net_para = net.state_dict()
-                    for key in net_para:
-                        # Keep the few-shot classifier, which is the small model owned by clients
-                        if not key.startswith('transformer') and not key.startswith('few_classify'):
-                            net_para[key] = global_w[key]
-                    net.load_state_dict(net_para)
+        if epoch >= args['warmup_epoch']:
+            # Test the global model
+            for k in args['meta_config']['test_k']:
+                accs = []
+                for epoch_test in range(args['num_test_tasks'] * args['num_true_test_ratio']):
+                    acc, max_value, index = local_test_net(args, global_model, x_test, y_test, server_test_transform, device, k)
+                    accs.append(acc)
 
-                # Test the global model
-                for k in args['meta_config']['test_k']:
-                    accs = []
-                    for epoch_test in range(args['num_test_tasks'] * args['num_true_test_ratio']):
-                        acc, max_value, index = local_test_net(args, nets_this_round[0], x_test, y_test, test_transform, device, k)
-                        accs.append(acc)
+                global_acc = np.mean(accs)
 
-                    global_acc = np.mean(accs)
+                if global_acc > best_acc_dict[k]:
+                    best_acc_dict[k] = global_acc
+                logger.info(f'>> Global Model few-shot {k} Meta-Test accuracy: {global_acc:.4f} Best Acc: {best_acc_dict[k]:.4f}')
+                if args['log_wandb']:
+                    wandb.log({f'Global K={k} Test Accuracy': global_acc}, step=epoch)
 
-                    if global_acc > best_acc_dict[k]:
-                        best_acc_dict[k] = global_acc
-                    logger.info(f'>> Global Model few-shot {k} Meta-Test accuracy: {global_acc:.4f} Best Acc: {best_acc_dict[k]:.4f}')
-                    if args['log_wandb']:
-                        wandb.log({f'Global K={k} Test Accuracy': global_acc}, step=epoch)
-
-            # Meta-training on each client's end
-            clients_meta_train(
-                nets_this_round,
+        if epoch == args['warmup_epoch']:
+            print('Warmup the generator')
+            KD_config = args['KD_config']
+            warmup_generator(
                 args,
-                epoch,
-                net_data_idx_map,
-                x_train,
-                y_train,
-                x_test,
-                y_test,
-                train_transform,
-                test_transform,
-                device=device)
+                global_model,
+                init_g_model,
+                clients_this_round.values(),
+                np.array(client_class_cnt),
+                KD_config['gen_model_lr'],
+                KD_config['batch_size'],
+                100,
+                KD_config['n_cls'],
+                device=args['device']
+            )
 
-            if epoch >= args['warmup_epoch']:
-                # Local to Global: Aggregate the clients' models
-                for net_id, net in enumerate(nets_this_round.values()):
-                    net_para = net.state_dict()
-                    if net_id == 0:
-                        for key in net_para:
-                            global_w[key] = net_para[key] * fed_avg_weight[net_id]
-                    else:
-                        for key in net_para:
-                            global_w[key] += net_para[key] * fed_avg_weight[net_id]
-
-            # Use knowledge distillation for the global model
-            global_model.load_state_dict(global_w)
+        if epoch >= args['warmup_epoch']:
+            # Local to Global: generator knowledge distillation from local to global model
             if args['use_KD_Generator']:
                 KD_config = args['KD_config']
                 KD_config['glb_model_lr'] *= KD_config['lr_decay_per_epoch']
                 KD_config['gen_model_lr'] *= KD_config['lr_decay_per_epoch']
 
-                avg_model_ft = local_to_global_knowledge_distillation(args, epoch, global_model, init_g_model, nets_this_round.values(),
-                                                                      np.array(client_class_cnt), device=args['device'],
-                                                                      **KD_config)
+                avg_model_ft, fake_data, fake_data_labels, server_embedding = \
+                    local_to_global_knowledge_distillation(args, epoch, global_model, init_g_model, clients_this_round.values(),
+                                                           np.array(client_class_cnt), device=args['device'], **KD_config)
                 global_model = avg_model_ft
+        else:
+            fake_data, fake_data_labels, server_embedding = None, None, None
 
-            if args['server_momentum']:
-                delta_w = copy.deepcopy(global_w)
-                for key in delta_w:
-                    delta_w[key] = old_w[key] - global_w[key]
-                    moment_v[key] = args['server_momentum'] * moment_v[key] + (1 - args['server_momentum']) * delta_w[key]
-                    global_w[key] = old_w[key] - moment_v[key]
+        ###############################################
+        # Meta-training on each client's end
+        clients_meta_train(
+            clients_this_round,
+            optimizers,
+            args,
+            epoch,
+            net_data_idx_map,
+            x_train,
+            y_train,
+            x_test,
+            y_test,
+            client_train_transform,
+            client_test_transform,
+            global_model, fake_data, fake_data_labels, server_embedding,
+            device=device)
 
-            # save model example
-            # torch.save(global_model.state_dict(),
-            #            args['checkpoint_dir'] + 'fedavg/' + 'globalmodel' + args['log_file_name'] + '.pth')
-            # torch.save(nets[0].state_dict(),
-            #            args['checkpoint_dir'] + 'fedavg/' + 'localmodel0' + args['log_file_name'] + '.pth')
+        # save model example
+        # torch.save(global_model.state_dict(),
+        #            args['checkpoint_dir'] + 'blackbox/' + 'globalmodel' + args['log_file_name'] + '.pth')
+        # torch.save(clients[0].state_dict(),
+        #            args['checkpoint_dir'] + 'blackbox/' + 'localmodel0' + args['log_file_name'] + '.pth')
 
 
 if __name__ == '__main__':

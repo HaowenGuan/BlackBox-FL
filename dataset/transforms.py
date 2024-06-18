@@ -2,8 +2,9 @@ import random
 import timm
 
 from PIL import Image, ImageFilter
-from torchvision import transforms
 import numpy as np
+from torchvision import transforms
+from torchvision.transforms.functional import InterpolationMode
 
 
 def get_fc100_transform():
@@ -50,17 +51,18 @@ def get_mini_image_transform():
     }
 
 
-def get_timm_transform(timm_model):
-    data_config = timm.data.resolve_model_data_config(timm_model)
-    train_transform = timm.data.create_transform(**data_config, is_training=False)
-    train_transform = transforms.Compose([
+def get_vit_224_size_transform(timm_model):
+    # data_config = timm.data.resolve_model_data_config(timm_model)
+    # transform  = timm.data.create_transform(**data_config, is_training=False)
+    # train_transform = test_transform = transforms.Compose([
+    #     transforms.ToPILImage(),
+    #     *transform.transforms[2:]
+    # ])
+    train_transform = test_transform = transforms.Compose([
         transforms.ToPILImage(),
-        *train_transform.transforms[2:]
-    ])
-    test_transform = timm.data.create_transform(**data_config, is_training=False)
-    test_transform = transforms.Compose([
-        transforms.ToPILImage(),
-        *test_transform.transforms[2:]
+        transforms.Resize(size=224, interpolation=InterpolationMode.BICUBIC, max_size=None, antialias=True),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.4815, 0.4578, 0.4082], std=[0.2686, 0.2613, 0.2758])
     ])
     return {
         'train_transform': train_transform,

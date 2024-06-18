@@ -1,8 +1,8 @@
-log_wandb: False
+log_wandb: True
 wandb_name: testing
 device: cuda
 cuda_gpu: 2
-use_KD_Generator: False
+use_KD_Generator: True
 disable_meta: False
 seed: 0
 dataset: FC100
@@ -13,7 +13,7 @@ data_dir: ./data/
 alg: fedavg
 beta: 1
 total_epoch: 1000
-warmup_epoch: 0
+warmup_epoch: 200
 num_classes: 100
 dropout_p: 0.0
 fine_tune_lr: 0.1
@@ -34,10 +34,10 @@ meta_config:
   fine_tune_steps: 5
   train_client_class: 20
   train_support_num: 2
-  train_query_num: 15
+  train_query_num: 5
   test_client_class: 5
   test_support_num: 5
-  test_query_num: 15
+  test_query_num: 5
   test_k: [1, 5]
 generator_config:
   model_name: CGeneratorA

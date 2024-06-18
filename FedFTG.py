@@ -5,6 +5,11 @@ import numpy as np
 import copy
 import wandb
 
+from torchvision import transforms
+from torchvision.transforms.functional import InterpolationMode
+
+resize = transforms.Resize(size=224, interpolation=InterpolationMode.BICUBIC, max_size=None, antialias=True)
+
 def generate_labels(number, class_num):
     labels = np.arange(number)
     proportions = class_num / class_num.sum()
@@ -39,8 +44,9 @@ def compute_backward_flow_G_dis(z, y_onehot, labels,
 
     fake = generator(z, y_onehot)
 
-    _, _, t_logit = teacher(fake, True)
-    _, _, s_logit = student(fake, True)
+    _, _, t_logit = teacher(fake)
+    _, _, s_logit = student(resize(fake))
+
     loss_md = - torch.mean(torch.mean(torch.abs(s_logit - t_logit.detach()), dim=1) * weight)
 
     # loss_cls = cls_criterion(t_logit, y)
@@ -152,6 +158,71 @@ class DiversityLoss(nn.Module):
 #     return loss_overall, acc_overall / n_tst
 
 
+def warmup_generator(
+        args,
+        student,
+        generator,
+        clients,
+        client_class_num,
+        gen_model_lr,
+        batch_size,
+        iterations,
+        n_cls,
+        device='cuda'):
+    """
+    Warmup generator.
+    """
+    generator.to(device)
+    num_clients, num_classes = client_class_num.shape
+    optimizer_G = torch.optim.Adam(generator.parameters(), lr=gen_model_lr)
+
+    class_num = np.sum(client_class_num, axis=0)
+    class_client_weight = client_class_num / (np.tile(class_num[np.newaxis, :], (num_clients, 1)) + 1e-6)
+    class_client_weight = class_client_weight.transpose()
+    labels_all = generate_labels(iterations * batch_size, class_num)
+    print('Start training generator and server model')
+    loss_G_meta = []
+    loss_md_total_meta = []
+    loss_cls_total_meta = []
+    loss_ap_total_meta = []
+    for e in range(iterations):
+        labels = labels_all[e * batch_size:(e * batch_size + batch_size)]
+        batch_weight = torch.Tensor(get_batch_weight(labels, class_client_weight)).to(device)
+        onehot = np.zeros((batch_size, num_classes))
+        onehot[np.arange(batch_size), labels] = 1
+        y_onehot = torch.Tensor(onehot).to(device)
+        z = torch.randn((batch_size, n_cls, 1, 1)).to(device)
+
+        ############## train generator ##############
+        student.eval()
+        generator.train()
+        loss_G = 0
+        loss_md_total = 0
+        loss_cls_total = 0
+        loss_ap_total = 0
+        for client_i, c_model in enumerate(clients):
+            optimizer_G.zero_grad()
+            loss, loss_md, loss_cls, loss_ap = compute_backward_flow_G_dis(z, y_onehot, labels,
+                                                                           generator, student, c_model,
+                                                                           batch_weight[:, client_i], num_clients,
+                                                                           device=device)
+            loss_G += loss
+            loss_md_total += loss_md
+            loss_cls_total += loss_cls
+            loss_ap_total += loss_ap
+            optimizer_G.step()
+
+        loss_G_meta.append(loss_G.item())
+        loss_md_total_meta.append(loss_md_total.item())
+        loss_cls_total_meta.append(loss_cls_total.item())
+        loss_ap_total_meta.append(loss_ap_total.item())
+
+    print('[WarmUp] KD Generator loss', loss_G_meta)
+    print('[WarmUp] KD Generator model discrepancy loss', loss_md_total_meta)
+    print('[WarmUp] KD Generator classification loss', loss_cls_total_meta)
+    print('[WarmUp] KD Generator diversity loss', loss_ap_total_meta)
+
+
 def local_to_global_knowledge_distillation(
         args,
         epoch,
@@ -181,14 +252,14 @@ def local_to_global_knowledge_distillation(
     optimizer_D = torch.optim.SGD(s_model.parameters(), lr=glb_model_lr, momentum=0.9, weight_decay=weight_decay)
     optimizer_G = torch.optim.Adam(g_model.parameters(), lr=gen_model_lr)
 
-    for params in s_model.parameters():
-        params.requires_grad = True
-
     class_num = np.sum(client_class_num, axis=0)
     class_client_weight = client_class_num / (np.tile(class_num[np.newaxis, :], (num_clients, 1)) + 1e-6)
     class_client_weight = class_client_weight.transpose()
     labels_all = generate_labels(iterations * batch_size, class_num)
     print('Start training generator and server model')
+    # fake_data = []
+    # fake_data_labels = []
+    # server_embedding = []
     for e in range(iterations):
         labels = labels_all[e * batch_size:(e * batch_size + batch_size)]
         batch_weight = torch.Tensor(get_batch_weight(labels, class_client_weight)).to(device)
@@ -238,13 +309,18 @@ def local_to_global_knowledge_distillation(
         g_model.eval()
         MSEloss = nn.MSELoss()
         loss_D_total = 0
+        with torch.no_grad():
+            fake = g_model(z, y_onehot).detach()
+        fake_224 = resize(fake)
+        # fake_data.append(fake)
+        # fake_data_labels.append(labels)
+        # server_embedding.append(emb)
         for i in range(d_inner_round):
             optimizer_D.zero_grad()
-            fake = g_model(z, y_onehot).detach()
-            _, _, s_logit = s_model(fake, all_classify=True)
+            _, emb, s_logit = s_model(fake_224, all_classify=True)
             c_logit_merge = 0
             for client_i, c_model in enumerate(c_models):
-                c_logit = c_model(fake, all_classify=True)[2].detach()
+                c_logit = c_model(fake)[2].detach()
                 c_logit_merge += F.softmax(c_logit, dim=1) * batch_weight[:, client_i][:, np.newaxis].repeat(1, num_classes)
             loss_D = torch.mean(-F.log_softmax(s_logit, dim=1) * c_logit_merge)
             loss_D_total += loss_D
@@ -256,6 +332,9 @@ def local_to_global_knowledge_distillation(
         if args['log_wandb']:
             wandb.log({'KD Server loss': loss_D_total}, step=epoch)
 
+        # fake_data = torch.cat(fake_data, dim=0)
+        # fake_data_labels = np.concatenate(fake_data_labels, axis=0)
+        # server_embedding = torch.cat(server_embedding, dim=0)
         # if (e + 1) % print_per == 0:
         #     loss_trn, acc_trn = get_acc_loss(trn_x, trn_y, s_model, dataset_name)
         #     loss_tst, acc_tst = get_acc_loss(tst_x, tst_y, s_model, dataset_name)
@@ -269,5 +348,6 @@ def local_to_global_knowledge_distillation(
     # for params in s_model.parameters():
     #     params.requires_grad = False
     s_model.eval()
+    fake_data, fake_data_labels, server_embedding = None, None, None
 
-    return s_model
+    return s_model, fake_data, fake_data_labels, server_embedding

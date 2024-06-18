@@ -860,7 +860,7 @@ class ModelFedCon_noheader(nn.Module):
         return h, h, y
 
 
-class ImageModel(nn.Module):
+class ServerModel(nn.Module):
 
     def __init__(self, encoder, client_class, total_class, pretrained):
         """
@@ -869,7 +869,7 @@ class ImageModel(nn.Module):
             encoder: str, encoder name
             client_class: int, number of classes
         """
-        super(ImageModel, self).__init__()
+        super(ServerModel, self).__init__()
 
         if encoder == "resnet50-cifar10" or encoder == "resnet50-cifar100" or encoder == "resnet50-smallkernel" or encoder == "resnet50":
             temp_model = ResNet50_cifar10()
@@ -902,19 +902,19 @@ class ImageModel(nn.Module):
         elif 'clip' in encoder:
             self.encoder = timm.create_model(encoder,
                                           pretrained=pretrained,
-                                          img_size=32,
+                                          img_size=224,
                                           num_classes=0).eval()
-            self.encoder.patch_embed.num_features = 4
-            self.encoder.num_patches = 4
-            data_config = timm.data.resolve_model_data_config(self.encoder)
-            train_transform = timm.data.create_transform(**data_config, is_training=False)
-            from torchvision import transforms
-            train_transform = transforms.Compose([
-                transforms.ToPILImage(),
-                *train_transform.transforms[2:]
-            ])
-            print(train_transform)
-            exit(0)
+            # self.encoder.patch_embed.num_features = 4
+            # self.encoder.num_patches = 4
+            # data_config = timm.data.resolve_model_data_config(self.encoder)
+            # train_transform = timm.data.create_transform(**data_config, is_training=False)
+            # from torchvision import transforms
+            # train_transform = transforms.Compose([
+            #     transforms.ToPILImage(),
+            #     *train_transform.transforms
+            # ])
+            # print(train_transform)
+            # exit(0)
             num_feature = 768
         else:
             raise "Unknown encoder"
@@ -931,7 +931,7 @@ class ImageModel(nn.Module):
         self.few_classify = nn.Linear(num_feature, client_class)
 
 
-    def forward(self, x_input, all_classify=False):
+    def forward(self, x_input, all_classify=True):
         """
         :param x_input: input image
         :param all_classify: if True, classify all classes, else classify few classes
