@@ -1,25 +1,29 @@
 log_wandb: True
-wandb_name: testing
+wandb_name: Adam_warmup
 device: cuda
-cuda_gpu: 2
+cuda_gpu: 0
 use_KD_Generator: True
 disable_meta: False
 seed: 0
 dataset: FC100
+data_dir: ./data/
 log_dir: ./logs/
 log_file_name: null
 checkpoint_dir: ./checkpoints/
-data_dir: ./data/
 alg: fedavg
 beta: 1
-total_epoch: 1000
-warmup_epoch: 200
+warmup_epoch: 40
+warmup_acc: 0.85
+warmup_bs: 50
+meta_steps: 0
 num_classes: 100
 dropout_p: 0.0
 fine_tune_lr: 0.1
 local_max_epoch: 100
 loss: contrastive
+optimizer: sgd
 lr: 0.001
+reg: 1.0e-05
 meta_lr: 0.001
 mode: few-shot
 n_parties: 10
@@ -61,11 +65,10 @@ KD_config:
 num_test_tasks: 10
 
 num_true_test_ratio: 10
-optimizer: sgd
+
 
 partition: noniid
 pool_option: FIFO
-reg: 1.0e-05
 sample_fraction: 1.0
 server_momentum: 0
 temperature: 0.5

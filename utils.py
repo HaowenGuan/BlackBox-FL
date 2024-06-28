@@ -10,7 +10,7 @@ import torch.nn as nn
 from sklearn.metrics import confusion_matrix
 import pickle as pkl
 # from model import *
-from dataset.common_datasets import CIFAR10_truncated, CIFAR100_truncated, ImageFolder_custom
+from dataset.cifar_dataset import CIFAR10_truncated, CIFAR100_truncated, ImageFolder_custom
 from collections import defaultdict
 
 logging.basicConfig()

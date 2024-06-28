@@ -3,11 +3,16 @@ import argparse
 import copy
 import datetime
 import random
+import yaml
+import sys
 
 import wandb as wandb
 from sklearn.linear_model import LogisticRegression
-import yaml
-import sys
+from torch.utils.data import DataLoader
+
+from few_shot_learning import few_shot_prototype, few_shot_logistic_regression
+from training import general_one_epoch
+
 
 from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
@@ -24,6 +29,7 @@ from models.model_factory_fn import get_generator, init_client_nets, init_server
 from FedFTG import local_to_global_knowledge_distillation, warmup_generator
 from pseudocode import main_pseudocode
 from dataset.transforms import *
+from dataset.custom_datasets import CustomDataset
 
 from collections import defaultdict, Counter
 
@@ -61,11 +67,6 @@ for fine_id, sparse_id in fine_to_coarse.items():
     # fine_split_train_map={class_:i for i,class_ in enumerate(fine_split['train'])}
 
 # train_class2id={class_id: i for i, class_id in enumerate(fine_split['train'])}
-
-def l2_normalize(x):
-    norm = (x.pow(2).sum(1, keepdim=True) + 1e-9).pow(1. / 2)
-    out = x.div(norm + 1e-9)
-    return out
 
 
 def InforNCE_Loss(anchor, sample, all_negative=False, temperature_matrix=None):
@@ -105,7 +106,7 @@ def init_args():
     parser.add_argument('--fine_tune_steps', type=int, default=5, help='number of meta-learning steps (5)')
     parser.add_argument('--fine_tune_lr', type=float, default=0.1, help='number of meta-learning lr (0.05)')
     parser.add_argument('--meta_lr', type=float, default=0.1 / 100, help='number of meta-learning lr (0.05)')
-    parser.add_argument('--total_epoch', type=int, default=5000, help='number of maximum communication round')
+    parser.add_argument('--meta_steps', type=int, default=5000, help='number of maximum communication round')
     parser.add_argument('--optimizer', type=str, default='sgd', help='the optimizer')
 
     parser.add_argument("--wv_path", type=str,
@@ -167,40 +168,35 @@ def init_args():
     return vars(args)
 
 
-def local_train_net(args, epoch, net,  optimizer, x_train_client, y_train_client, transform, global_model, fake_data, fake_data_labels, server_embedding,  device='cpu'):
+def meta_train_net(args, epoch, net, optimizer, x, y, transform, global_model, fake_data, fake_data_labels, server_embedding, device='cpu'):
     """
     Train a network on a given dataset with meta learning
     :param args: the arguments
     :param epoch: the current epoch
     :param net: the network to train
-    :param x_train_client: the training data for this client
-    :param y_train_client: the training labels for this client
+    :param x: the training data for this client
+    :param y: the training labels for this client
     :param transform: the transformation to apply to the data
     :param device: the device to use
     """
-    # net = nn.DataParallel(net)
-    # net=nn.parallel.DistributedDataParallel(net)
-    # net.cuda()
     net.train()
-    for params in net.parameters():
-        params.requires_grad = True
-    if args['optimizer'] == 'adam':
-        optimizer = optim.Adam(net.parameters(), lr=args['lr'], weight_decay=args['reg'])
-    elif args['optimizer'] == 'amsgrad':
-        optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=args['lr'], weight_decay=args['reg'],
-                               amsgrad=True)
-    elif args['optimizer'] == 'sgd':
-        optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=0.05, momentum=0.9,
-                              weight_decay=args['reg'])
+    # for params in net.parameters():
+    #     params.requires_grad = True
+    # if args['optimizer'] == 'adam':
+    #     optimizer = optim.Adam(net.parameters(), lr=args['lr'], weight_decay=args['reg'])
+    # elif args['optimizer'] == 'amsgrad':
+    #     optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=args['lr'], weight_decay=args['reg'],
+    #                            amsgrad=True)
+    # elif args['optimizer'] == 'sgd':
+    #     optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=0.05, momentum=0.9,
+    #                           weight_decay=args['reg'])
+    optimizer.zero_grad()
     loss_ce = nn.CrossEntropyLoss()
     loss_mse = nn.MSELoss()
 
     N = args['meta_config']['train_client_class']
     K = args['meta_config']['train_support_num']
     Q = args['meta_config']['train_query_num']
-
-    optimizer.zero_grad()
-
 
     if args['dataset'] == 'FC100':
         class_dict = fine_split['train']
@@ -216,77 +212,10 @@ def local_train_net(args, epoch, net,  optimizer, x_train_client, y_train_client
                       76, 77, 78]
     elif args['dataset'] == 'huffpost':
         class_dict = list(range(20))
-    fine_split_train_map = {class_: i for i, class_ in enumerate(class_dict)}
 
-    X = x_train_client
-    y = y_train_client
-
-    # Pick N classes
-    # Make sure that each class has at least K + Q samples
-    temp_class_dict = class_dict.copy()
-    min_size = 0
-    while min_size < K + Q:
-        X_class = []
-        # Shrink the client number of classes if there are not enough samples
-        N = min(N, len(temp_class_dict))
-        classes = np.random.choice(temp_class_dict, N, replace=False).tolist()
-        for i in classes:
-            X_class.append(X[y == i])
-            if X_class[-1].shape[0] < K + Q:
-                temp_class_dict.remove(i)
-        min_size = min([one.shape[0] for one in X_class])
-
-    # support_labels = torch.zeros(N * K, dtype=torch.long)
-    # for i in range(N):
-    #     support_labels[i * K:(i + 1) * K] = i
-    # query_labels = torch.zeros(N * Q, dtype=torch.long)
-    # for i in range(N):
-    #     query_labels[i * Q:(i + 1) * Q] = i
-    # support_labels = support_labels.to(device)
-    # query_labels = query_labels.to(device)
-
-    x_sup = []
-    y_sup = []
-    # Following labels are never used actually
-    x_query = []
-    y_query = []
-    transformed_class_index_list = []
-    # sample K + Q samples for each class
-    for class_index, class_data in zip(classes, X_class):
-        sample_idx = np.random.choice(list(range(class_data.shape[0])), K + Q, replace=False).tolist()
-        x_sup.append(class_data[sample_idx[:K]])
-        x_query.append(class_data[sample_idx[K:]])
-
-        if args['dataset'] == 'FC100' or args['dataset'] == '20newsgroup' or args['dataset'] == 'fewrel' or args['dataset'] == 'huffpost':
-            transformed_class_index_list.append(class_index)
-            y_sup.append(torch.ones(K) * class_index)
-            y_query.append(torch.ones(Q) * class_index)
-        elif args['dataset'] == 'miniImageNet':
-            transformed_class_index_list.append(class_index)
-            y_sup.append(torch.ones(K) * class_index)
-            y_query.append(torch.ones(Q) * class_index)
-
-    x_sup = np.concatenate(x_sup, 0)
-    x_query = np.concatenate(x_query, 0)
-    support_labels = torch.tensor(np.concatenate(y_sup, 0)).long().to(args['device'])
-    query_labels = torch.tensor(np.concatenate(y_query, 0)).long().to(args['device'])
-    y_total = torch.cat([support_labels, query_labels], 0).long().to(args['device'])
-
-    # Apply the same transformation to the support set and the query set if its image dataset
-    if args['dataset'] == 'FC100' or args['dataset'] == 'miniImageNet':
-        X_total_transformed_sup = []
-        X_total_transformed_query = []
-        for i in range(x_sup.shape[0]):
-            X_total_transformed_sup.append(transform(x_sup[i]))
-        x_sup = torch.stack(X_total_transformed_sup, 0)
-
-        for i in range(x_query.shape[0]):
-            X_total_transformed_query.append(transform(x_query[i]))
-        x_query = torch.stack(X_total_transformed_query, 0)
-
-    # Finalized meta-learning data
-    x_sup = torch.tensor(x_sup).to(args['device'])
-    x_query = torch.tensor(x_query).to(args['device'])
+    x_sup, y_sup, x_qry, y_qry = sample_few_shot_data(x, y, class_dict, transform, N, K, Q, device=device)
+    x_total = torch.cat([x_sup, x_qry], 0).to(device)
+    y_total = torch.cat([y_sup, y_qry], 0).long().to(device)
 
     # Start training
     ############################
@@ -296,14 +225,14 @@ def local_train_net(args, epoch, net,  optimizer, x_train_client, y_train_client
     for j in range(args['meta_config']['fine_tune_steps']):
         ft_optimizer.zero_grad()
         ft_sup_embedding, ft_sup_transformer_feature, ft_sup_y_hat = ft_net(x_sup)
-        loss = loss_ce(ft_sup_y_hat, support_labels)
+        loss = loss_ce(ft_sup_y_hat, y_sup)
         loss.backward()
         ft_optimizer.step()
     ############################
     # Meta-Update
     ft_optimizer.zero_grad()
-    _, _, meta_query_y_hat = ft_net(x_query)
-    loss = loss_ce(meta_query_y_hat, query_labels)
+    _, _, meta_query_y_hat = ft_net(x_qry)
+    loss = loss_ce(meta_query_y_hat, y_qry)
     loss.backward()
 
     if args['log_wandb']:
@@ -329,7 +258,7 @@ def local_train_net(args, epoch, net,  optimizer, x_train_client, y_train_client
     ############################
     # Local to Global Knowledge Distillation Through Feature Matching
 
-    _, client_embedding, y_hat = net(torch.cat([x_sup, x_query], 0))
+    _, client_embedding, y_hat = net(x_total)
     client_embedding = client_embedding.reshape([N, K + Q, -1]).transpose(0, 1)
     #
     # # Maximize the similarity of local and global H
@@ -337,7 +266,7 @@ def local_train_net(args, epoch, net,  optimizer, x_train_client, y_train_client
     loss = 0
     global_model.eval()
     with torch.no_grad():
-        server_embedding, _, y_hat = global_model(resize(torch.cat([x_sup, x_query], 0)))
+        server_embedding, _, y_hat = global_model(resize(torch.cat([x_sup, x_qry], 0)))
     server_embedding = server_embedding.reshape([N, K + Q, -1]).transpose(0, 1)
     for j in range(K + Q):
         contras_loss, similarity = InforNCE_Loss(server_embedding[j], client_embedding[j])
@@ -353,7 +282,7 @@ def local_train_net(args, epoch, net,  optimizer, x_train_client, y_train_client
     return acc_train
 
 
-def local_test_net(args, net, x_test, y_test, transform, device='cpu', test_k=None):
+def meta_test_net(args, net, x_test, y_test, transform, device='cpu', test_k=None):
     """
         test a net on a given dataset with meta learning
         :param args: the arguments
@@ -364,27 +293,9 @@ def local_test_net(args, net, x_test, y_test, transform, device='cpu', test_k=No
         :param test_k: specific k for the test, if None, use the default test_k
         :param device: the device to use
         """
-    # net = nn.DataParallel(net)
-    # net=nn.parallel.DistributedDataParallel(net)
-    # net.cuda()
-
-    # logger.info('Training network %s' % str(net_id))
-    # logger.info('n_training: %d' % X_train_client.shape[0])
-    # logger.info('n_test: %d' % x_test.shape[0])
-
     N = args['meta_config']['test_client_class']
     K = test_k if test_k else args['meta_config']['test_support_num']
     Q = args['meta_config']['test_query_num']
-    net.eval()
-
-    support_labels = torch.zeros(N * K, dtype=torch.long)
-    for i in range(N):
-        support_labels[i * K:(i + 1) * K] = i
-    query_labels = torch.zeros(N * Q, dtype=torch.long)
-    for i in range(N):
-        query_labels[i * Q:(i + 1) * Q] = i
-    support_labels = support_labels.to(device)
-    query_labels = query_labels.to(device)
 
     if args['dataset'] == 'FC100':
         class_dict = fine_split['test']
@@ -396,36 +307,50 @@ def local_test_net(args, net, x_test, y_test, transform, device='cpu', test_k=No
         class_dict = [23, 29, 42, 47, 51, 54, 55, 60, 65, 79]
     elif args['dataset'] == 'huffpost':
         class_dict = list(range(25, 41))
+    else:
+        raise ValueError('Unknown dataset')
 
-    X = x_test
-    y = y_test
+    x_sup, y_sup, x_qry, y_qry = sample_few_shot_data(x_test, y_test, class_dict, transform, N, K, Q, device=device)
 
+    # Testing
+    net.eval()
+    with torch.no_grad():
+        acc = few_shot_logistic_regression(net, x_sup, y_sup, x_qry, y_qry)
+
+    return acc
+
+
+def sample_few_shot_data(x, y, class_dict, transform, N, K, Q, device='cpu'):
     # Pick N classes
     # Make sure that there are at least K + Q samples for each class
-    min_size = 0
-    while min_size < K + Q:
+    class_dict = class_dict.copy()
+    current_min_size = 0
+    while current_min_size < K + Q:
         X_class = []
         classes = np.random.choice(class_dict, N, replace=False).tolist()
         for i in classes:
-            X_class.append(X[y == i])
+            X_class.append(x[y == i])
             if X_class[-1].shape[0] < K + Q:
                 class_dict.remove(i)
-        min_size = min([one.shape[0] for one in X_class])
+        current_min_size = min([one.shape[0] for one in X_class])
 
     x_sup = []
     y_sup = []
     # Following labels are never used actually
-    x_query = []
-    y_query = []
-    transformed_class_index_list = []
+    x_qry = []
+    y_qry = []
     # sample K + Q samples for each class
     for class_index, class_data in zip(classes, X_class):
         sample_idx = np.random.choice(list(range(class_data.shape[0])), K + Q, replace=False).tolist()
         x_sup.append(class_data[sample_idx[:K]])
-        x_query.append(class_data[sample_idx[K:]])
+        x_qry.append(class_data[sample_idx[K:]])
+        y_sup.append(torch.ones(K) * class_index)
+        y_qry.append(torch.ones(Q) * class_index)
 
     x_sup = np.concatenate(x_sup, 0)
-    x_query = np.concatenate(x_query, 0)
+    x_qry = np.concatenate(x_qry, 0)
+    y_sup = torch.cat(y_sup, 0).long()
+    y_qry = torch.cat(y_qry, 0).long()
 
     # Apply the same transformation to the support set and the query set if its image dataset
     if args['dataset'] == 'FC100' or args['dataset'] == 'miniImageNet':
@@ -434,49 +359,24 @@ def local_test_net(args, net, x_test, y_test, transform, device='cpu', test_k=No
         for i in range(x_sup.shape[0]):
             X_total_transformed_sup.append(transform(x_sup[i]))
         x_sup = torch.stack(X_total_transformed_sup, 0)
-
-        for i in range(x_query.shape[0]):
-            X_total_transformed_query.append(transform(x_query[i]))
-        x_query = torch.stack(X_total_transformed_query, 0)
+        for i in range(x_qry.shape[0]):
+            X_total_transformed_query.append(transform(x_qry[i]))
+        x_qry = torch.stack(X_total_transformed_query, 0)
 
     # Finalized meta-learning data
-    x_sup = torch.tensor(x_sup).to(args['device'])
-    x_query = torch.tensor(x_query).to(args['device'])
+    x_sup = torch.tensor(x_sup).to(device)
+    x_qry = torch.tensor(x_qry).to(device)
 
-    # Testing
-    with torch.no_grad():
-        latent_embedding, _, _ = net(torch.cat([x_sup, x_query], 0))
-        sup_embedding = latent_embedding[:N * K]
-        query_embedding = latent_embedding[N * K:]
-
-        sup_embedding = l2_normalize(sup_embedding.detach().cpu()).numpy()
-        query_embedding = l2_normalize(query_embedding.detach().cpu()).numpy()
-
-        clf = LogisticRegression(penalty='l2',
-                                 random_state=0,
-                                 C=1.0,
-                                 solver='lbfgs',
-                                 max_iter=1000,
-                                 multi_class='multinomial')
-        clf.fit(sup_embedding, support_labels.detach().cpu().numpy())
-
-        query_y_hat = clf.predict(query_embedding)
-        query_y_hat_prob = torch.tensor(clf.predict_proba(query_embedding)).to(args['device'])
-
-        acc_train = (torch.argmax(query_y_hat_prob, -1) == query_labels).float().mean().item()
-        max_value, index = torch.max(query_y_hat_prob, -1)
-
-        # del net_new, ft_sup_embedding, ft_query_embedding, ft_sup_y_hat, param_require_grad, grads
-    return acc_train, max_value, index
+    return x_sup, y_sup, x_qry, y_qry
 
 
-def clients_meta_train(nets, opts, args, epoch, net_dataidx_map, x_train, y_train, x_test, y_test, train_transform, test_transform, global_model, fake_data, fake_data_labels, server_embedding, device="cpu"):
+def clients_meta_train(nets, opts, args, epoch, net_data_idx_map, x_train, y_train, x_test, y_test, train_transform, test_transform, global_model, fake_data, fake_data_labels, server_embedding, device="cpu"):
     acc_list = []
 
     for net_id, net in nets.items():
 
         # Each client has a list of data samples assigned to it in the format of indices
-        data_idxs = net_dataidx_map[net_id]
+        data_idxs = net_data_idx_map[net_id]
 
         # get the private data for the client
         X_train_client = x_train[data_idxs]
@@ -485,12 +385,12 @@ def clients_meta_train(nets, opts, args, epoch, net_dataidx_map, x_train, y_trai
         # Training
         accs = []
         for _ in range(args['meta_config']['num_train_tasks']):
-            accs.append(local_train_net(args, epoch, net, opts[net_id], X_train_client, y_train_client, train_transform, global_model, fake_data, fake_data_labels, server_embedding, device=device))
+            accs.append(meta_train_net(args, epoch, net, opts[net_id], X_train_client, y_train_client, train_transform, global_model, fake_data, fake_data_labels, server_embedding, device=device))
 
         # Local Testing
         accs_test = []
         for _ in range(args['num_test_tasks']):
-            acc_test, _, _ = local_test_net(args, net, x_test, y_test, test_transform, device)
+            acc_test = meta_test_net(args, net, x_test, y_test, test_transform, device)
             accs_test.append(acc_test)
 
         acc_list.append(np.mean(accs_test))
@@ -556,16 +456,15 @@ def run_experiment(args):
     logger.info("Partitioning data")
     x_train, y_train, x_test, y_test, net_data_idx_map, client_class_cnt = partition_data(
         args['dataset'], args['data_dir'], args['partition'], args['n_parties'], beta=args['beta'])
-
     # Initialize FL client pattern
     n_party_per_round = int(args['n_parties'] * args['sample_fraction'])
     party_list = [i for i in range(args['n_parties'])]
     party_list_rounds = []
     if n_party_per_round != args['n_parties']:
-        for i in range(args['total_epoch']):
+        for i in range(args['meta_steps']):
             party_list_rounds.append(random.sample(party_list, n_party_per_round))
     else:
-        for i in range(args['total_epoch']):
+        for i in range(args['meta_steps']):
             party_list_rounds.append(party_list)
 
     n_classes = len(np.unique(y_train))
@@ -578,14 +477,17 @@ def run_experiment(args):
     for client_id, client in clients.items():
         for param in client.parameters():
             param.requires_grad = True
-        if args['optimizer'] == 'adam':
-            optimizer = optim.Adam(client.parameters(), lr=args['lr'], weight_decay=args['reg'])
-        elif args['optimizer'] == 'amsgrad':
-            optimizer = optim.Adam(filter(lambda p: p.requires_grad, client.parameters()), lr=args['lr'], weight_decay=args['reg'],
-                                   amsgrad=True)
-        elif args['optimizer'] == 'sgd':
-            optimizer = optim.SGD(filter(lambda p: p.requires_grad, client.parameters()), lr=0.05, momentum=0.9,
-                                  weight_decay=args['reg'])
+        optimizer = optim.Adam(client.parameters(), lr=args['lr'], weight_decay=args['reg'])
+        # optimizer = optim.SGD(filter(lambda p: p.requires_grad, client.parameters()), lr=0.05, momentum=0.9,
+        #                       weight_decay=args['reg'])
+        # if args['optimizer'] == 'adam':
+        #     optimizer = optim.Adam(client.parameters(), lr=args['lr'], weight_decay=args['reg'])
+        # elif args['optimizer'] == 'amsgrad':
+        #     optimizer = optim.Adam(filter(lambda p: p.requires_grad, client.parameters()), lr=args['lr'], weight_decay=args['reg'],
+        #                            amsgrad=True)
+        # elif args['optimizer'] == 'sgd':
+        #     optimizer = optim.SGD(filter(lambda p: p.requires_grad, client.parameters()), lr=0.05, momentum=0.9,
+        #                           weight_decay=args['reg'])
         optimizers[client_id] = optimizer
 
     server_train_transform = server_test_transform = client_train_transform = client_test_transform = None
@@ -608,6 +510,65 @@ def run_experiment(args):
     else:
         raise ValueError('Unknown encoder')
 
+    train_loaders = {}
+    for client_id, client in clients.items():
+        # Each client has a list of data samples assigned to it in the format of indices
+        data_idxs = net_data_idx_map[client_id]
+
+        # Get the private data for the client
+        X_train_client = x_train[data_idxs]
+        y_train_client = y_train[data_idxs]
+
+        # Create the private data loader for each client
+        train_dataset = CustomDataset(X_train_client, y_train_client, transform=client_train_transform)
+        train_loader = DataLoader(train_dataset, batch_size=args['warmup_bs'], shuffle=True, num_workers=4)
+
+        train_loaders[client_id] = train_loader
+
+    test_data_num = len(x_test)
+    test_dataset = CustomDataset(x_test, y_test, transform=client_test_transform)
+    test_loader = DataLoader(test_dataset, batch_size=args['warmup_bs'], shuffle=False, num_workers=4)
+
+    logger.info(">> Warmup Each Clients:")
+    client_best_acc = {}
+    for client_id, client in clients.items():
+        client_best_acc[client_id] = 0
+    epoch = 0
+    while min(client_best_acc.values()) < args['warmup_acc']:
+        epoch += 1
+        cur_clients = []
+        all_loss = []
+        all_acc = []
+        for client_id, client in clients.items():
+            if client_best_acc[client_id] > args['warmup_acc']:
+                continue
+            client.train()
+            cur_clients.append(client_id)
+            client_loss, client_acc = general_one_epoch(client, train_loaders[client_id], optimizers[client_id], device)
+            all_loss.append(client_loss)
+            all_acc.append(client_acc)
+            client_best_acc[client_id] = max(client_best_acc[client_id], client_acc)
+        all_loss = [f'{loss:.2f}' for loss in all_loss]
+        all_acc = [f'{acc:.2f}' for acc in all_acc]
+        results = ' | '.join(f'{c}:({loss},{acc})' for c, loss, acc in zip(cur_clients, all_loss, all_acc))
+        logger.info(f">> Epoch {epoch}, Client Warmup Train (Loss,Acc): {results}")
+        if args['log_wandb']:
+            wandb.log({'Warmup Train Acc': sum(client_best_acc.values()) / args['n_parties']}, step=epoch)
+
+        # Evaluate
+        all_loss = []
+        all_acc = []
+        for client_id, client in clients.items():
+            client.eval()
+            client_loss, client_acc = general_one_epoch(client, train_loaders[client_id], optimizers[client_id], device)
+            all_loss.append(client_loss)
+            all_acc.append(client_acc)
+        logger.info(f">> Epoch {epoch}, Client Warmup test Loss: {' | '.join(f'{loss:.4f}' for loss in all_loss)}")
+        logger.info(f">> Epoch {epoch}, Client Warmup test Acc: {' | '.join(f'{acc:.4f}' for acc in all_acc)}")
+        logger.info("-------------------------------------------------------------------------------------------------")
+        if args['log_wandb']:
+            wandb.log({f'Warmup Test Loss': sum(all_loss) / args['n_parties']}, step=epoch)
+            wandb.log({f'Warmup Test Accuracy': sum(all_acc) / args['n_parties']}, step=epoch)
 
 
     # set up the generator
@@ -617,9 +578,9 @@ def run_experiment(args):
     best_acc_dict = Counter()
     best_confident_acc = 0
 
-    for epoch in range(args['total_epoch']):
-        logger.info(f'>> Current Round: {epoch}')
-        party_list_this_round = party_list_rounds[epoch]
+    for step in range(epoch, epoch + args['meta_steps']):
+        logger.info(f'>> Current Round: {step}')
+        party_list_this_round = party_list_rounds[step]
 
         global_w = global_model.state_dict()
 
@@ -630,49 +591,47 @@ def run_experiment(args):
         # Calculate the percentage of data points for each client
         fed_avg_weight = [len(net_data_idx_map[r]) / total_data_points for r in range(args['n_parties'])]
 
-        if epoch >= args['warmup_epoch']:
-            # Test the global model
-            for k in args['meta_config']['test_k']:
-                accs = []
-                for epoch_test in range(args['num_test_tasks'] * args['num_true_test_ratio']):
-                    acc, max_value, index = local_test_net(args, global_model, x_test, y_test, server_test_transform, device, k)
-                    accs.append(acc)
+        # Test the global model
+        for k in args['meta_config']['test_k']:
+            accs = []
+            for epoch_test in range(args['num_test_tasks'] * args['num_true_test_ratio']):
+                acc, max_value, index = meta_test_net(args, global_model, x_test, y_test, server_test_transform, device, k)
+                accs.append(acc)
 
-                global_acc = np.mean(accs)
+            global_acc = np.mean(accs)
 
-                if global_acc > best_acc_dict[k]:
-                    best_acc_dict[k] = global_acc
-                logger.info(f'>> Global Model few-shot {k} Meta-Test accuracy: {global_acc:.4f} Best Acc: {best_acc_dict[k]:.4f}')
-                if args['log_wandb']:
-                    wandb.log({f'Global K={k} Test Accuracy': global_acc}, step=epoch)
+            if global_acc > best_acc_dict[k]:
+                best_acc_dict[k] = global_acc
+            logger.info(f'>> Global Model few-shot {k} Meta-Test accuracy: {global_acc:.4f} Best Acc: {best_acc_dict[k]:.4f}')
+            if args['log_wandb']:
+                wandb.log({f'Global K={k} Test Accuracy': global_acc}, step=step)
 
-        if epoch == args['warmup_epoch']:
-            print('Warmup the generator')
-            KD_config = args['KD_config']
-            warmup_generator(
-                args,
-                global_model,
-                init_g_model,
-                clients_this_round.values(),
-                np.array(client_class_cnt),
-                KD_config['gen_model_lr'],
-                KD_config['batch_size'],
-                100,
-                KD_config['n_cls'],
-                device=args['device']
-            )
-
-        if epoch >= args['warmup_epoch']:
-            # Local to Global: generator knowledge distillation from local to global model
-            if args['use_KD_Generator']:
+        if args['use_KD_Generator']:
+            if step == args['warmup_epoch']:
+                print('Warmup the generator')
                 KD_config = args['KD_config']
-                KD_config['glb_model_lr'] *= KD_config['lr_decay_per_epoch']
-                KD_config['gen_model_lr'] *= KD_config['lr_decay_per_epoch']
+                warmup_generator(
+                    args,
+                    global_model,
+                    init_g_model,
+                    clients_this_round.values(),
+                    np.array(client_class_cnt),
+                    KD_config['gen_model_lr'],
+                    KD_config['batch_size'],
+                    100,
+                    KD_config['n_cls'],
+                    device=args['device']
+                )
 
-                avg_model_ft, fake_data, fake_data_labels, server_embedding = \
-                    local_to_global_knowledge_distillation(args, epoch, global_model, init_g_model, clients_this_round.values(),
-                                                           np.array(client_class_cnt), device=args['device'], **KD_config)
-                global_model = avg_model_ft
+            # Local to Global: generator knowledge distillation from local to global model
+            KD_config = args['KD_config']
+            KD_config['glb_model_lr'] *= KD_config['lr_decay_per_epoch']
+            KD_config['gen_model_lr'] *= KD_config['lr_decay_per_epoch']
+
+            avg_model_ft, fake_data, fake_data_labels, server_embedding = \
+                local_to_global_knowledge_distillation(args, step, global_model, init_g_model, clients_this_round.values(),
+                                                       np.array(client_class_cnt), device=args['device'], **KD_config)
+            global_model = avg_model_ft
         else:
             fake_data, fake_data_labels, server_embedding = None, None, None
 
@@ -682,7 +641,7 @@ def run_experiment(args):
             clients_this_round,
             optimizers,
             args,
-            epoch,
+            step,
             net_data_idx_map,
             x_train,
             y_train,

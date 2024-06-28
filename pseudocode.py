@@ -52,7 +52,7 @@ def main_pseudocode(args, logger):
         logger.info(f'{Color.BOLD}Random initialize{Color.END} model for server and clients')
     logger.info(f'Total number of clients: {args["n_parties"]}')
     logger.info(f'Number of clients per round: {int(args["n_parties"] * args["sample_fraction"])}')
-    logger.info(f'For a total of {Color.BOLD}{args["total_epoch"]}{Color.END} round:')
+    logger.info(f'For a total of {Color.BOLD}{args["meta_steps"]}{Color.END} round:')
     _algorithm_pseudocode(args, logger, '\t')
     logger.info(f'\t{Color.BOLD}Fusing client model{Color.END} by weighted FedAvg Algorithm')
     if args['use_KD_Generator']:

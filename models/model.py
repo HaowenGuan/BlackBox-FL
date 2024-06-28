@@ -919,37 +919,24 @@ class ServerModel(nn.Module):
         else:
             raise "Unknown encoder"
 
+        # trainable parameter for cosine similarity
+        self.tau = nn.Parameter(torch.tensor(1.0))
 
         # projection MLP
-        self.l1 = nn.Linear(num_feature, num_feature)
-        self.l2 = nn.Linear(num_feature, num_feature)
         self.all_classify = nn.Linear(num_feature, total_class)
 
-        # Output layer for few classification
-        encoder_layer = nn.TransformerEncoderLayer(d_model=num_feature, nhead=4)
-        self.transformer= nn.TransformerEncoder(encoder_layer=encoder_layer, num_layers=2)
-        self.few_classify = nn.Linear(num_feature, client_class)
 
-
-    def forward(self, x_input, all_classify=True):
+    def forward(self, x_input):
         """
         :param x_input: input image
         :param all_classify: if True, classify all classes, else classify few classes
         """
         ebd = self.encoder(x_input)
         # remove all dimensions with size 1
-        ebd = ebd.squeeze()
-
-        if all_classify:
-            h = self.l1(ebd)
-            h = F.relu(h)
-            h = self.l2(h)
-            y = self.all_classify(h)
-        else:
-            h = self.transformer(ebd)
-            y = self.few_classify(h)
-
-        return ebd, h, y
+        b, c = ebd.size(0), ebd.size(1)
+        h = ebd.squeeze().view(b, c)
+        y = self.all_classify(h)
+        return h, y
 
 
 class ClientModel(nn.Module):
@@ -983,13 +970,14 @@ class ClientModel(nn.Module):
         else:
             raise "Unknown encoder"
 
+        # trainable parameter for cosine similarity
+        self.tau = nn.Parameter(torch.tensor(1.0))
+
         # Docking layer
         self.docking = nn.Linear(num_feature, server_feature)
 
         # projection MLP
-        self.l1 = nn.Linear(num_feature, num_feature)
-        self.l2 = nn.Linear(num_feature, num_feature)
-        self.all_classify = nn.Linear(num_feature, num_classes)
+        self.output = nn.Linear(num_feature, num_classes)
 
 
     def forward(self, x_input):
@@ -999,15 +987,12 @@ class ClientModel(nn.Module):
         """
         ebd = self.encoder(x_input)
         # remove all dimensions with size 1
-        ebd = ebd.squeeze()
+        b, c = ebd.size(0), ebd.size(1)
+        ebd = ebd.squeeze().view(b, c)
+        h = self.docking(ebd)
+        y = self.output(ebd)
 
-        h = self.l1(ebd)
-        h = F.relu(h)
-        h = self.l2(h)
-        h_output = self.docking(h)
-        y = self.all_classify(h)
-
-        return ebd, h_output, y
+        return h, y
 
 
 class WORDEBD(nn.Module):

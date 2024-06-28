@@ -143,6 +143,9 @@ class CIFAR100_truncated(data.Dataset):
         return len(self.data)
 
 
+# class Custom_Dataset(data.Dataset):
+#
+
 
 
 class ImageFolder_custom(DatasetFolder):

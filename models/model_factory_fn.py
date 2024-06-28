@@ -4,6 +4,7 @@ from models import resnet
 from models import generators
 from models.model import *
 import copy
+import torchsummary
 
 
 def get_model(model_name, **kwargs):
@@ -33,6 +34,10 @@ def init_client_nets(num_clients, args):
     if args['mode'] == 'few-shot':
         if args['dataset'] == 'FC100' or args['dataset'] == 'miniImageNet':
             model = ClientModel(net_config['encoder'], net_config['total_class'], 768)
+            model.to(args['device'])
+            size = get_model_size(model)
+            print(f'Client model {net_config["encoder"]} size: {size:.3f}MB')
+            # torchsummary.summary(model, input_size=(3, 32, 32))
         else:
             model = LSTMAtt(WORDEBD(args['finetune_ebd']), net_config['out_dim'], client_classes, server_classes, args)
 
@@ -60,6 +65,10 @@ def init_server_net(args):
 
     if args['dataset'] == 'FC100' or args['dataset'] == 'miniImageNet':
         model = ServerModel(**net_config)
+        model.to(args['device'])
+        size = get_model_size(model)
+        # torchsummary.summary(model, input_size=(3, 224, 224))
+        print(f'Server model {net_config["encoder"]} size: {size:.3f}MB')
     else:
         model = LSTMAtt(WORDEBD(args['finetune_ebd']), net_config['out_dim'], client_classes, server_classes, args)
     model.to(args['device'])
@@ -71,3 +80,14 @@ def init_server_net(args):
         layer_type.append(k)
 
     return model, model_meta_data, layer_type
+
+
+def get_model_size(model):
+    param_size = 0
+    for param in model.parameters():
+        param_size += param.nelement() * param.element_size()
+    buffer_size = 0
+    for buffer in model.buffers():
+        buffer_size += buffer.nelement() * buffer.element_size()
+    size_all_mb = (param_size + buffer_size) / 1024 ** 2
+    return size_all_mb
