@@ -1,5 +1,7 @@
 import random
 import timm
+import torch
+import torch.nn.functional as F
 
 from PIL import Image, ImageFilter
 import numpy as np

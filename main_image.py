@@ -16,6 +16,7 @@ from training import general_one_epoch
 
 from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
+from models.feature_extractor.fe_utils import DiffAugment
 
 resize = transforms.Resize(size=224, interpolation=InterpolationMode.BICUBIC, max_size=None, antialias=True)
 
@@ -179,7 +180,6 @@ def meta_train_net(args, epoch, net, optimizer, x, y, transform, global_model, f
     :param transform: the transformation to apply to the data
     :param device: the device to use
     """
-    net.train()
     # for params in net.parameters():
     #     params.requires_grad = True
     # if args['optimizer'] == 'adam':
@@ -190,9 +190,8 @@ def meta_train_net(args, epoch, net, optimizer, x, y, transform, global_model, f
     # elif args['optimizer'] == 'sgd':
     #     optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=0.05, momentum=0.9,
     #                           weight_decay=args['reg'])
-    optimizer.zero_grad()
-    loss_ce = nn.CrossEntropyLoss()
-    loss_mse = nn.MSELoss()
+    # loss_ce = nn.CrossEntropyLoss()
+    # loss_mse = nn.MSELoss()
 
     N = args['meta_config']['train_client_class']
     K = args['meta_config']['train_support_num']
@@ -217,69 +216,15 @@ def meta_train_net(args, epoch, net, optimizer, x, y, transform, global_model, f
     x_total = torch.cat([x_sup, x_qry], 0).to(device)
     y_total = torch.cat([y_sup, y_qry], 0).long().to(device)
 
-    # Start training
+    # Meta Training
     ############################
-    # Fast Adaptation
-    ft_net = copy.deepcopy(net)
-    ft_optimizer = optim.SGD(filter(lambda p: p.requires_grad, net.parameters()), lr=0.05, momentum=0.9, weight_decay=args['reg'])
-    for j in range(args['meta_config']['fine_tune_steps']):
-        ft_optimizer.zero_grad()
-        ft_sup_embedding, ft_sup_transformer_feature, ft_sup_y_hat = ft_net(x_sup)
-        loss = loss_ce(ft_sup_y_hat, y_sup)
-        loss.backward()
-        ft_optimizer.step()
-    ############################
-    # Meta-Update
-    ft_optimizer.zero_grad()
-    _, _, meta_query_y_hat = ft_net(x_qry)
-    loss = loss_ce(meta_query_y_hat, y_qry)
-    loss.backward()
-
-    if args['log_wandb']:
-        wandb.log({'Client Query Loss': loss.item()}, step=epoch)
-
-    for param1, param2 in zip(ft_net.parameters(), net.parameters()):
-        if param2.grad is not None:
-            param2.grad.zero_()  # zero out gradients in model2 to avoid accumulating with existing ones
-        if param1.grad is not None:
-            param2.grad = param1.grad.clone()
-
-    optimizer.step()
+    net.train()
     optimizer.zero_grad()
-
-    # Global to Local Distillation Through Logits Matching
-    # out_sup_on_N_class = y_hat[N * K:, transformed_class_index_list]
-    # out_sup_on_N_class /= out_sup_on_N_class.sum(-1, keepdim=True)
-    # mse = loss_mse(meta_query_y_hat, out_sup_on_N_class) * 0.1
-    # loss += mse
-    # if args['log_wandb']:
-    #     wandb.log({'Global to Local Partial KD Loss': mse.item()}, step=epoch)
-
-    ############################
-    # Local to Global Knowledge Distillation Through Feature Matching
-
-    _, client_embedding, y_hat = net(x_total)
-    client_embedding = client_embedding.reshape([N, K + Q, -1]).transpose(0, 1)
-    #
-    # # Maximize the similarity of local and global H
-    # # Update the parameter of global model (Main Feature + Full Classifier)
-    loss = 0
-    global_model.eval()
-    with torch.no_grad():
-        server_embedding, _, y_hat = global_model(resize(torch.cat([x_sup, x_qry], 0)))
-    server_embedding = server_embedding.reshape([N, K + Q, -1]).transpose(0, 1)
-    for j in range(K + Q):
-        contras_loss, similarity = InforNCE_Loss(server_embedding[j], client_embedding[j])
-        loss += contras_loss / K
-    if args['log_wandb']:
-        wandb.log({'Global to Local Contrastive Loss': loss.item()}, step=epoch)
+    loss, acc = few_shot_prototype(net, x_sup, y_sup, x_qry, y_qry)
     loss.backward()
     optimizer.step()
 
-    acc_train = (torch.argmax(y_hat, -1) == y_total).float().mean().item()
-    #
-    # del latent_embedding, y_hat
-    return acc_train
+    return acc
 
 
 def meta_test_net(args, net, x_test, y_test, transform, device='cpu', test_k=None):
@@ -290,8 +235,9 @@ def meta_test_net(args, net, x_test, y_test, transform, device='cpu', test_k=Non
         :param x_test: the test data
         :param y_test: the test labels
         :param transform: the transform to apply to the data
-        :param test_k: specific k for the test, if None, use the default test_k
+        :param finetune: the number of finetune steps
         :param device: the device to use
+        :param test_k: specific k for the test, if None, use the default test_k
         """
     N = args['meta_config']['test_client_class']
     K = test_k if test_k else args['meta_config']['test_support_num']
@@ -312,12 +258,32 @@ def meta_test_net(args, net, x_test, y_test, transform, device='cpu', test_k=Non
 
     x_sup, y_sup, x_qry, y_qry = sample_few_shot_data(x_test, y_test, class_dict, transform, N, K, Q, device=device)
 
-    # Testing
-    net.eval()
+    # Fine-tune with meta-test
+    test_net = copy.deepcopy(net)
+    test_net.train()
+    meta_config = args['meta_config']
+    optimizer = optim.Adam(test_net.parameters(), lr=meta_config['test_fine_tune_lr'], weight_decay=args['reg'])
+    test_accs = {}
+    for step in range(meta_config['test_fine_tune_steps']):
+        if step % 10 == 0:
+            test_net.eval()
+            with torch.no_grad():
+                loss, acc = few_shot_prototype(test_net, x_sup, y_sup, x_qry, y_qry)
+            test_accs[step] = acc
+            test_net.train()
+        optimizer.zero_grad()
+        aug_x_sup = DiffAugment(x_sup, meta_config['aug_types'], meta_config['aug_prob'], detach=True)
+        loss, acc = few_shot_prototype(test_net, x_sup, y_sup, aug_x_sup, y_sup)
+        loss.backward()
+        optimizer.step()
+    # Last meta-test
+    test_net.eval()
     with torch.no_grad():
-        acc = few_shot_logistic_regression(net, x_sup, y_sup, x_qry, y_qry)
+        loss, acc = few_shot_prototype(test_net, x_sup, y_sup, x_qry, y_qry)
+    test_accs[meta_config['test_fine_tune_steps']] = acc
+    # acc = few_shot_logistic_regression(net, x_sup, y_sup, x_qry, y_qry)
 
-    return acc
+    return test_accs
 
 
 def sample_few_shot_data(x, y, class_dict, transform, N, K, Q, device='cpu'):
@@ -349,8 +315,8 @@ def sample_few_shot_data(x, y, class_dict, transform, N, K, Q, device='cpu'):
 
     x_sup = np.concatenate(x_sup, 0)
     x_qry = np.concatenate(x_qry, 0)
-    y_sup = torch.cat(y_sup, 0).long()
-    y_qry = torch.cat(y_qry, 0).long()
+    y_sup = torch.cat(y_sup, 0).long().to(device)
+    y_qry = torch.cat(y_qry, 0).long().to(device)
 
     # Apply the same transformation to the support set and the query set if its image dataset
     if args['dataset'] == 'FC100' or args['dataset'] == 'miniImageNet':
@@ -371,10 +337,10 @@ def sample_few_shot_data(x, y, class_dict, transform, N, K, Q, device='cpu'):
 
 
 def clients_meta_train(nets, opts, args, epoch, net_data_idx_map, x_train, y_train, x_test, y_test, train_transform, test_transform, global_model, fake_data, fake_data_labels, server_embedding, device="cpu"):
-    acc_list = []
+    meta_train_acc = []
+    meta_test_acc = defaultdict(list)
 
     for net_id, net in nets.items():
-
         # Each client has a list of data samples assigned to it in the format of indices
         data_idxs = net_data_idx_map[net_id]
 
@@ -382,27 +348,33 @@ def clients_meta_train(nets, opts, args, epoch, net_data_idx_map, x_train, y_tra
         X_train_client = x_train[data_idxs]
         y_train_client = y_train[data_idxs]
 
-        # Training
-        accs = []
+        # Meta Training
+        acc_train = []
         for _ in range(args['meta_config']['num_train_tasks']):
-            accs.append(meta_train_net(args, epoch, net, opts[net_id], X_train_client, y_train_client, train_transform, global_model, fake_data, fake_data_labels, server_embedding, device=device))
+            acc_train.append(meta_train_net(args, epoch, net, opts[net_id], X_train_client, y_train_client, train_transform, global_model, fake_data, fake_data_labels, server_embedding, device=device))
+        meta_train_acc.append(np.mean(acc_train))
 
-        # Local Testing
-        accs_test = []
+        # Meta Testing
+        acc_test = defaultdict(list)
         for _ in range(args['num_test_tasks']):
-            acc_test = meta_test_net(args, net, x_test, y_test, test_transform, device)
-            accs_test.append(acc_test)
+            acc_dict = meta_test_net(args, net, x_test, y_test, test_transform, device)
+            for step, acc in acc_dict.items():
+                acc_test[step].append(acc)
+        for step, acc_list in acc_test.items():
+            meta_test_acc[step].append(np.mean(acc_list))
 
-        acc_list.append(np.mean(accs_test))
 
-    logger.info(' | '.join(['{:.4f}'.format(acc) for acc in acc_list]))
+    logger.info(f'Epoch {epoch}:')
+    logger.info('Meta Train Accuracy: ' + ' | '.join(['{:.4f}'.format(acc) for acc in meta_train_acc]))
+    # logger.info('Meta Test Accuracy: ' + ' | '.join(['{:.4f}'.format(acc) for acc in meta_test_acc]))
+    for step, acc_list in meta_test_acc.items():
+        logger.info(f'Meta Test Accuracy at FT step {step}: ' + ' | '.join(['{:.4f}'.format(acc) for acc in acc_list]))
+
     if args['log_wandb']:
-        wandb.log({f'{args["n_parties"]} clients Train Accuracy': np.mean(acc_list)}, step=epoch)
-        wandb.log({f'{args["n_parties"]} clients Best Train Accuracy': np.max(acc_list)}, step=epoch)
-
-    if args['alg'] == 'local_training':
-        logger.info("avg test acc %f" % np.mean(acc_list))
-        logger.info("std acc %f" % np.std(acc_list))
+        wandb.log({f'{args["n_parties"]} clients Meta Train Accuracy': np.mean(meta_train_acc)}, step=epoch)
+        for step, acc_list in meta_test_acc.items():
+            wandb.log({f'{args["n_parties"]} clients Meta Test Accuracy at FT {step}': np.mean(acc_list)}, step=epoch)
+        # wandb.log({f'{args["n_parties"]} clients Meta Test Accuracy': np.mean(meta_test_acc)}, step=epoch)
 
 
 def init_wandb(args):
@@ -555,20 +527,20 @@ def run_experiment(args):
         if args['log_wandb']:
             wandb.log({'Warmup Train Acc': sum(client_best_acc.values()) / args['n_parties']}, step=epoch)
 
-        # Evaluate
-        all_loss = []
-        all_acc = []
-        for client_id, client in clients.items():
-            client.eval()
-            client_loss, client_acc = general_one_epoch(client, train_loaders[client_id], optimizers[client_id], device)
-            all_loss.append(client_loss)
-            all_acc.append(client_acc)
-        logger.info(f">> Epoch {epoch}, Client Warmup test Loss: {' | '.join(f'{loss:.4f}' for loss in all_loss)}")
-        logger.info(f">> Epoch {epoch}, Client Warmup test Acc: {' | '.join(f'{acc:.4f}' for acc in all_acc)}")
-        logger.info("-------------------------------------------------------------------------------------------------")
-        if args['log_wandb']:
-            wandb.log({f'Warmup Test Loss': sum(all_loss) / args['n_parties']}, step=epoch)
-            wandb.log({f'Warmup Test Accuracy': sum(all_acc) / args['n_parties']}, step=epoch)
+        # # Evaluate
+        # all_loss = []
+        # all_acc = []
+        # for client_id, client in clients.items():
+        #     client.eval()
+        #     client_loss, client_acc = general_one_epoch(client, train_loaders[client_id], optimizers[client_id], device)
+        #     all_loss.append(client_loss)
+        #     all_acc.append(client_acc)
+        # logger.info(f">> Epoch {epoch}, Client Warmup test Loss: {' | '.join(f'{loss:.4f}' for loss in all_loss)}")
+        # logger.info(f">> Epoch {epoch}, Client Warmup test Acc: {' | '.join(f'{acc:.4f}' for acc in all_acc)}")
+        # logger.info("-------------------------------------------------------------------------------------------------")
+        # if args['log_wandb']:
+        #     wandb.log({f'Warmup Test Loss': sum(all_loss) / args['n_parties']}, step=epoch)
+        #     wandb.log({f'Warmup Test Accuracy': sum(all_acc) / args['n_parties']}, step=epoch)
 
 
     # set up the generator
@@ -578,11 +550,25 @@ def run_experiment(args):
     best_acc_dict = Counter()
     best_confident_acc = 0
 
+    if args['use_KD_Generator']:
+        print('Warmup the generator')
+        KD_config = args['KD_config']
+        warmup_generator(
+            args,
+            global_model,
+            init_g_model,
+            clients.values(),
+            np.array(client_class_cnt),
+            KD_config['gen_model_lr'],
+            KD_config['batch_size'],
+            100,
+            KD_config['n_cls'],
+            device=args['device']
+        )
+
     for step in range(epoch, epoch + args['meta_steps']):
         logger.info(f'>> Current Round: {step}')
-        party_list_this_round = party_list_rounds[step]
-
-        global_w = global_model.state_dict()
+        party_list_this_round = party_list_rounds[step - epoch]
 
         clients_this_round = {k: clients[k] for k in party_list_this_round}
 
@@ -592,37 +578,21 @@ def run_experiment(args):
         fed_avg_weight = [len(net_data_idx_map[r]) / total_data_points for r in range(args['n_parties'])]
 
         # Test the global model
-        for k in args['meta_config']['test_k']:
-            accs = []
-            for epoch_test in range(args['num_test_tasks'] * args['num_true_test_ratio']):
-                acc, max_value, index = meta_test_net(args, global_model, x_test, y_test, server_test_transform, device, k)
-                accs.append(acc)
-
-            global_acc = np.mean(accs)
-
-            if global_acc > best_acc_dict[k]:
-                best_acc_dict[k] = global_acc
-            logger.info(f'>> Global Model few-shot {k} Meta-Test accuracy: {global_acc:.4f} Best Acc: {best_acc_dict[k]:.4f}')
-            if args['log_wandb']:
-                wandb.log({f'Global K={k} Test Accuracy': global_acc}, step=step)
+        # for k in args['meta_config']['test_k']:
+        #     accs = []
+        #     for epoch_test in range(args['num_test_tasks'] * args['num_true_test_ratio']):
+        #         acc = meta_test_net(args, global_model, x_test, y_test, server_test_transform, device, k)
+        #         accs.append(acc)
+        #
+        #     global_acc = np.mean(accs)
+        #
+        #     if global_acc > best_acc_dict[k]:
+        #         best_acc_dict[k] = global_acc
+        #     logger.info(f'>> Global Model few-shot {k} Meta-Test accuracy: {global_acc:.4f} Best Acc: {best_acc_dict[k]:.4f}')
+        #     if args['log_wandb']:
+        #         wandb.log({f'Global K={k} Test Accuracy': global_acc}, step=step)
 
         if args['use_KD_Generator']:
-            if step == args['warmup_epoch']:
-                print('Warmup the generator')
-                KD_config = args['KD_config']
-                warmup_generator(
-                    args,
-                    global_model,
-                    init_g_model,
-                    clients_this_round.values(),
-                    np.array(client_class_cnt),
-                    KD_config['gen_model_lr'],
-                    KD_config['batch_size'],
-                    100,
-                    KD_config['n_cls'],
-                    device=args['device']
-                )
-
             # Local to Global: generator knowledge distillation from local to global model
             KD_config = args['KD_config']
             KD_config['glb_model_lr'] *= KD_config['lr_decay_per_epoch']

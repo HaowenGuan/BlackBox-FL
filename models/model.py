@@ -980,18 +980,18 @@ class ClientModel(nn.Module):
         self.output = nn.Linear(num_feature, num_classes)
 
 
-    def forward(self, x_input):
+    def forward(self, x_input, use_docking=True):
         """
         :param x_input: input image
-        :param all_classify: if True, classify all classes, else classify few classes
+        :param use_docking: if True, use docking layer to project the feature, else use the original feature
         """
         ebd = self.encoder(x_input)
         # remove all dimensions with size 1
         b, c = ebd.size(0), ebd.size(1)
-        ebd = ebd.squeeze().view(b, c)
-        h = self.docking(ebd)
-        y = self.output(ebd)
-
+        h = ebd.squeeze().view(b, c)
+        y = self.output(h)
+        if use_docking:
+            h = self.docking(h)
         return h, y
 
 

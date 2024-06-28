@@ -1,8 +1,8 @@
 log_wandb: True
-wandb_name: Adam_warmup
+wandb_name: Warmup + meta_learning_baseline + finetune_lr_0.0001
 device: cuda
 cuda_gpu: 0
-use_KD_Generator: True
+use_KD_Generator: False
 disable_meta: False
 seed: 0
 dataset: FC100
@@ -12,13 +12,12 @@ log_file_name: null
 checkpoint_dir: ./checkpoints/
 alg: fedavg
 beta: 1
-warmup_epoch: 40
+#warmup_epoch: 40
 warmup_acc: 0.85
 warmup_bs: 50
-meta_steps: 0
+meta_steps: 100
 num_classes: 100
 dropout_p: 0.0
-fine_tune_lr: 0.1
 local_max_epoch: 100
 loss: contrastive
 optimizer: sgd
@@ -34,8 +33,7 @@ net_config:
   total_class: 100
   pretrained: True
 meta_config:
-  num_train_tasks: 1
-  fine_tune_steps: 5
+  num_train_tasks: 10
   train_client_class: 20
   train_support_num: 2
   train_query_num: 5
@@ -43,6 +41,10 @@ meta_config:
   test_support_num: 5
   test_query_num: 5
   test_k: [1, 5]
+  test_fine_tune_lr: 0.0001
+  test_fine_tune_steps: 50
+  aug_types: [color, translation]
+  aug_prob: 1.0
 generator_config:
   model_name: CGeneratorA
   n_cls: 100

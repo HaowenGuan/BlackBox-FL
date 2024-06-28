@@ -19,7 +19,7 @@ def _algorithm_pseudocode(args, logger, prefix=''):
     logger.info(prefix + f'{Color.BOLD}Training{Color.END} each client:')
     logger.info(prefix + f'\tN: {meta_config["train_client_class"]}, K: {meta_config["train_support_num"]}, Q: {meta_config["train_query_num"]}')
     logger.info(prefix + f'\tFor a total of {meta_config["num_train_tasks"]} epochs:')
-    logger.info(prefix + f'\t\tTemporarily {Color.BOLD}fine-tune{Color.END} client model classifier with support set (size {meta_config["train_support_num"]}) for {meta_config["fine_tune_steps"]} iterations')
+    logger.info(prefix + f'\t\tTemporarily {Color.BOLD}fine-tune{Color.END} client model classifier with support set (size {meta_config["train_support_num"]}) for {meta_config["test_fine_tune_steps"]} iterations')
     logger.info(prefix + f'\t\tProceed 1 step {Color.BOLD}meta-update{Color.END} based on loss of query set (size {meta_config["train_query_num"]})')
     logger.info(prefix + f'\t\tProceed {Color.BOLD}global to local{Color.END} partial KD by compute MSE loss between logits of client model and server model')
     logger.info(prefix + f'\t\tProceed {Color.BOLD}local to global{Color.END} partial KD by compute InforNCE between hidden embedding of server model and client model\'s main feature')
