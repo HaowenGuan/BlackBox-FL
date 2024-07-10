@@ -11,6 +11,10 @@ from torch.hub import load_state_dict_from_url
 from models.feature_extractor.vision_transformer import VisionTransformer
 from functools import partial
 import timm
+from lora import LoRA_ViT_timm
+
+from torchvision import transforms
+from torchvision.transforms.functional import InterpolationMode
 
 
 model_urls = {
@@ -870,6 +874,7 @@ class ServerModel(nn.Module):
             client_class: int, number of classes
         """
         super(ServerModel, self).__init__()
+        self.transform = None
 
         if encoder == "resnet50-cifar10" or encoder == "resnet50-cifar100" or encoder == "resnet50-smallkernel" or encoder == "resnet50":
             temp_model = ResNet50_cifar10()
@@ -899,23 +904,28 @@ class ServerModel(nn.Module):
             self.encoder = resnet12(avg_pool=True, drop_rate=0.1, dropblock_size=2)
             #num_feature=2560
             num_feature=640
-        elif 'clip' in encoder:
-            self.encoder = timm.create_model(encoder,
+        elif encoder == 'vit_base_patch16_clip_224.openai':
+            self.transform = transforms.Resize(size=224, interpolation=InterpolationMode.BICUBIC, max_size=None, antialias=True)
+            clip = timm.create_model(encoder,
                                           pretrained=pretrained,
                                           img_size=224,
                                           num_classes=0).eval()
-            # self.encoder.patch_embed.num_features = 4
-            # self.encoder.num_patches = 4
-            # data_config = timm.data.resolve_model_data_config(self.encoder)
-            # train_transform = timm.data.create_transform(**data_config, is_training=False)
-            # from torchvision import transforms
-            # train_transform = transforms.Compose([
-            #     transforms.ToPILImage(),
-            #     *train_transform.transforms
-            # ])
-            # print(train_transform)
-            # exit(0)
+            # We freeze the weights of the ViT inside this model
+            # do not set all parameters to require_grad when using server model
+            self.encoder = LoRA_ViT_timm(vit_model=clip, r=4, alpha=4, num_classes=0)
             num_feature = 768
+        elif encoder == 'clip_vit_tiny':
+            self.encoder = VisionTransformer(
+                img_size=32,
+                patch_size=4,
+                embed_dim=192,
+                depth=12,
+                num_heads=3,
+                mlp_ratio=4,
+                qkv_bias=True,
+                norm_layer=partial(nn.LayerNorm, eps=1e-6)
+            )
+            num_feature = 192
         else:
             raise "Unknown encoder"
 
@@ -929,8 +939,9 @@ class ServerModel(nn.Module):
     def forward(self, x_input):
         """
         :param x_input: input image
-        :param all_classify: if True, classify all classes, else classify few classes
         """
+        if self.transform:
+            x_input = self.transform(x_input)
         ebd = self.encoder(x_input)
         # remove all dimensions with size 1
         b, c = ebd.size(0), ebd.size(1)

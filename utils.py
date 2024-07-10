@@ -114,7 +114,7 @@ def record_net_data_stats(y_train, net_dataidx_map, logdir):
     return net_cls_counts
 
 
-def partition_data(dataset, data_dir, partition, n_parties, beta=0.4):
+def partition_data(dataset, data_dir, partition, n_parties, beta=0.4, seed=0):
     if dataset == 'cifar10':
         X_train, y_train, X_test, y_test = load_cifar10_data(data_dir)
     elif dataset == 'cifar100' or dataset == 'FC100':
@@ -171,6 +171,11 @@ def partition_data(dataset, data_dir, partition, n_parties, beta=0.4):
         X_train, y_train, X_test, y_test = load_tinyimagenet_data(data_dir)
     else:
         raise ValueError('Unrecognized dataset')
+
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+    np.random.seed(seed)
 
     if partition == "homo" or partition == "iid":
         n_train = y_train.shape[0]
@@ -236,7 +241,7 @@ def partition_data(dataset, data_dir, partition, n_parties, beta=0.4):
 
     # client_class_cnt = record_net_data_stats(y_train, net_data_idx_map, logdir)
     client_class_cnt = np.array(class_client_cnt).transpose()
-    return (X_train, y_train, X_test, y_test, net_data_idx_map, client_class_cnt)
+    return X_train, y_train, X_test, y_test, net_data_idx_map, client_class_cnt
 
 
 def get_trainable_parameters(net, device='cpu'):

@@ -10,9 +10,9 @@ def few_shot_prototype(net, x_sup, y_sup, x_qry, y_qry):
     https://arxiv.org/pdf/2003.04390
     Based on paper, meta training with this approach will overfit training base classes.
     Specifically, meta testing acc on base classes will increase but novel classes will decrease.
-    Before calling this function...
-    - make sure to call net.train() and net.eval() accordingly.
-    - make sure net and data are on the same device.
+    [Warning]
+    - Make sure to call net.train() and net.eval() accordingly before this function.
+    - Make sure net and data are on the same device before this function.
     """
     embedding_sup, y_hat_sup = net(x_sup)
     embedding_qry, y_hat_qry = net(x_qry)

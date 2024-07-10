@@ -1,26 +1,53 @@
-log_wandb: True
-wandb_name: Warmup + meta_learning_baseline + finetune_lr_0.0001
+### System ###
 device: cuda
 cuda_gpu: 0
-use_KD_Generator: False
-disable_meta: False
+log_wandb: True
+wandb_name: Distill knowledge from generator to clients
+wandb_start_step: 0
+
+### Switches ###
+use_Generator_KD: True # A
+use_KD_dataset: False # B
+use_server_model: False
+log_generator: False
+warmup_clients: False
+warmup_generator: False
+
+### Save Clients / Generator checkpoints ###
+save_clients: False
+save_generator: null # A / B, null or file name
+save_fake_data: False # C
+checkpoint_dir: ./checkpoints/
+
+### Load Clients / Generator checkpoints ###
+#load_clients: null
+#load_clients: ./checkpoints/warmup/
+load_clients: ./checkpoints/meta_learning/
+# A / B
+#load_generator: null
+load_generator: ./checkpoints/generator/global.pth
+# C
+#load_fake_data: null
+load_fake_data: ./checkpoints/fake_data/
+
 seed: 0
 dataset: FC100
 data_dir: ./data/
 log_dir: ./logs/
 log_file_name: null
-checkpoint_dir: ./checkpoints/
 alg: fedavg
 beta: 1
+
+### Clients Warmup ###
 #warmup_epoch: 40
-warmup_acc: 0.85
+warmup_acc: 0.90
 warmup_bs: 50
-meta_steps: 100
 num_classes: 100
 dropout_p: 0.0
 local_max_epoch: 100
 loss: contrastive
 optimizer: sgd
+server_lr: 0.0001
 lr: 0.001
 reg: 1.0e-05
 meta_lr: 0.001
@@ -28,21 +55,27 @@ mode: few-shot
 n_parties: 10
 net_config:
 #  encoder: resnet18
-  encoder: vit_base_patch16_clip_224.openai
+#  encoder: vit_base_patch16_clip_224.openai
+  encoder: clip_vit_tiny
   client_class: 20
   total_class: 100
   pretrained: True
+
+### Meta Learning ###
+meta_steps: 20
 meta_config:
   num_train_tasks: 10
-  train_client_class: 20
-  train_support_num: 2
-  train_query_num: 5
+  num_test_tasks: 100
+  train_client_class: 5
+  train_support_num: 5
+  train_query_num: 15
   test_client_class: 5
   test_support_num: 5
-  test_query_num: 5
-  test_k: [1, 5]
-  test_fine_tune_lr: 0.0001
-  test_fine_tune_steps: 50
+  test_query_num: 15
+  test_k: [5]
+  test_ft_approach: prototype # prototype / classic
+  test_ft_lr: 0.001
+  test_ft_steps: 20
   aug_types: [color, translation]
   aug_prob: 1.0
 generator_config:
@@ -52,26 +85,20 @@ generator_config:
   nc: 3
   img_size: 32
 KD_config:
-  glb_model_lr: 0.1
-  gen_model_lr: 0.01
+  loss_function: KLDiv # MSE / KLDiv
+  num_of_kd_steps: 100
+  use_md_loss: False
+  gen_model_lr: 0.001
   lr_decay_per_epoch: 0.99
-  batch_size: 50
-  weight_decay: 0.00001
+  batch_size: 100
   iterations: 10
-  g_inner_round: 1
+  warmup_early_stop: 25
+  weight_decay: 0.00001
   d_inner_round: 5
   n_cls: 100
 
-#
-
-num_test_tasks: 10
-
-num_true_test_ratio: 10
-
-
 partition: noniid
 pool_option: FIFO
-sample_fraction: 1.0
 server_momentum: 0
 temperature: 0.5
 word_vector: wiki.en.vec

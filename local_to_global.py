@@ -1,4 +1,3 @@
-from generator import Generator
 import sys
 import os
 from torch.nn import CrossEntropyLoss

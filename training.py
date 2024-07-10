@@ -6,7 +6,7 @@ import torch.nn.functional as F
 def general_one_epoch(net, data_loader, optimizer=None, device='cpu'):
     """
     General one epoch function for training and validation
-    [Important] if optimizer is provided, it will train the model.
+    [Note] if optimizer is provided, it will train the model.
     Make sure to call net.train() and net.eval() accordingly before calling this function.
     """
     total_loss = 0

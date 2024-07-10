@@ -19,7 +19,7 @@ def _algorithm_pseudocode(args, logger, prefix=''):
     logger.info(prefix + f'{Color.BOLD}Training{Color.END} each client:')
     logger.info(prefix + f'\tN: {meta_config["train_client_class"]}, K: {meta_config["train_support_num"]}, Q: {meta_config["train_query_num"]}')
     logger.info(prefix + f'\tFor a total of {meta_config["num_train_tasks"]} epochs:')
-    logger.info(prefix + f'\t\tTemporarily {Color.BOLD}fine-tune{Color.END} client model classifier with support set (size {meta_config["train_support_num"]}) for {meta_config["test_fine_tune_steps"]} iterations')
+    logger.info(prefix + f'\t\tTemporarily {Color.BOLD}fine-tune{Color.END} client model classifier with support set (size {meta_config["train_support_num"]}) for {meta_config["test_ft_steps"]} iterations')
     logger.info(prefix + f'\t\tProceed 1 step {Color.BOLD}meta-update{Color.END} based on loss of query set (size {meta_config["train_query_num"]})')
     logger.info(prefix + f'\t\tProceed {Color.BOLD}global to local{Color.END} partial KD by compute MSE loss between logits of client model and server model')
     logger.info(prefix + f'\t\tProceed {Color.BOLD}local to global{Color.END} partial KD by compute InforNCE between hidden embedding of server model and client model\'s main feature')
@@ -51,7 +51,7 @@ def main_pseudocode(args, logger):
     else:
         logger.info(f'{Color.BOLD}Random initialize{Color.END} model for server and clients')
     logger.info(f'Total number of clients: {args["n_parties"]}')
-    logger.info(f'Number of clients per round: {int(args["n_parties"] * args["sample_fraction"])}')
+    logger.info(f'Number of clients per round: {int(args["n_parties"])}')
     logger.info(f'For a total of {Color.BOLD}{args["meta_steps"]}{Color.END} round:')
     _algorithm_pseudocode(args, logger, '\t')
     logger.info(f'\t{Color.BOLD}Fusing client model{Color.END} by weighted FedAvg Algorithm')
